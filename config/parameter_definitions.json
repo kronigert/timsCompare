@@ -1,0 +1,57 @@
+{
+    "__GENERAL__": [
+        "calc_segment_start_time",
+        "calc_segment_end_time",
+        "calc_scan_mode",
+        "Mode_IonPolarity",
+		"Internal_SWCompatibilityUseIMS",
+        "IMS_imeX_Mode",
+		"Mode_ScanBegin",
+		"Mode_ScanEnd",
+        "IMS_imeX_RampStart",
+        "IMS_imeX_RampEnd",
+        "IMS_imeX_RampTime",
+        "IMS_imeX_AccumulationTime",
+        "calc_cycle_time",
+        "calc_ce_ramping_start",
+        "calc_ce_ramping_end",
+        "calc_advanced_ce_ramping_display_list",
+        "IMSICC_Mode",
+        "IMSICC_Target",
+        "IMSICC_ICC2_MaxTicTargetPercent",
+        "IMSICC_ICC2_MinAccuTime",
+        "IMSICC_ICC2_ReferenceTicCapacity",
+        "IMSICC_ICC2_SmoothingFactor",
+		"TOF_DetectorTof_HighSensitivity_Enabled"
+    ],
+	"MS": [
+		"Ims_Stepping_Active"
+	],
+	"MS-MS/MS (bbCID)": [
+		"MSMS_BBCIDEnergyISCID",
+		"MSMS_BBCIDEnergyCollision"
+	],
+    "MS/MS (Pasef)": [
+        "MSMS_Pasef_NumRampsPerCycle",
+        "MSMS_Pasef_Scheduler_TargetIntensity",
+        "MSMS_Pasef_IntensityThreshold",
+        "MSMS_Pasef_AllowedCharge_Minimum",
+        "MSMS_Pasef_AllowedCharge_Maximum",
+		"MSMS_Pasef_CycleOverlap",
+		"MSMS_Pasef_Scheduler_SwitchingTime",
+		"MSMS_Pasef_Scheduler_MeasuringTime"
+    ],
+    "dia-PASEF": [
+        "calc_ms1_scans",
+        "calc_ramps",
+        "calc_steps",
+        "calc_mz_width",
+        "calc_scan_area_mz"
+    ],
+    "diagonal-PASEF": [
+        "calc_ms1_scans",
+        "calc_ramps",
+        "calc_mz_width",
+        "calc_scan_area_mz"
+    ]
+}

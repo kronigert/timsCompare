@@ -1,0 +1,6 @@
+customtkinter
+pandas
+fpdf
+matplotlib
+Pillow
+tkinterdnd2
