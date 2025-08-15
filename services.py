@@ -1,36 +1,55 @@
-import os
-import json
-import sqlite3
-import xml.etree.ElementTree as ET
-import io
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from PIL import Image
-import customtkinter as ctk
-from typing import Optional, Any, List, Dict, Tuple
-from fpdf import FPDF
+"""
+Contains the core business logic of the timsCompare application.
 
-from settings import ENABLE_DEBUG_LOGGING
+This module implements the "Service Layer" of the application's architecture.
+It encapsulates all logic related to data loading, processing, calculation,
+plotting, and report generation into distinct, stateless service classes. These
+services are instantiated once at startup and injected into the UI layer,
+adhering to the "Separation of Concerns" and "Dependency Injection" principles.
+"""
+import io
+import json
+import logging
+import os
+import sqlite3
+import tempfile
+import xml.etree.ElementTree as ET
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import customtkinter as ctk
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from fpdf import FPDF
+from PIL import Image
+
 from app_config import AppConfig
 from data_model import Dataset, Segment
+from settings import ENABLE_DEBUG_LOGGING
 from utils import format_parameter_value
 
-# --- Custom Exception Classes ---
+
+# --- Custom Exceptions ---
+
 class DataProcessingError(Exception):
     """Base class for errors that occur during data loading and processing."""
     pass
+
 class MethodFileNotFoundError(DataProcessingError):
     """Raised when the primary .method file cannot be found in a dataset folder."""
     pass
+
 class UnsupportedScanModeError(DataProcessingError):
     """Raised when a method's scan mode is not supported by the application."""
     pass
+
 class ParsingError(DataProcessingError):
     """Raised for general errors during file parsing (e.g., malformed XML)."""
     pass
 
+
+# --- Service Classes ---
 
 class DataLoaderService:
     """
@@ -38,10 +57,98 @@ class DataLoaderService:
     from instrument method folders.
     """
     def __init__(self, config: AppConfig):
+        """
+        Initializes the DataLoaderService.
+
+        Args:
+            config (AppConfig): The application configuration object.
+        """
         self.config = config
         self._find_cache = {}
+        self.logger = logging.getLogger(__name__)
+
+    def get_default_parameters_for_dataset(self, dataset: Dataset) -> List[Dict]:
+        """
+        Gets the default parameter configurations for a dataset.
+
+        This method determines the appropriate default view by inspecting all
+        workflows present in the dataset's segments and applying conditional logic
+        (e.g., hiding segment timing parameters for single-segment methods).
+
+        Args:
+            dataset (Dataset): The dataset for which to get default parameters.
+
+        Returns:
+            List[Dict]: An ordered list of parameter definition dictionaries.
+        """
+        if not dataset or not dataset.segments:
+            return []
+
+        # Determine context flags from all segments in the dataset
+        has_multisegment_file = len(dataset.segments) > 1
+        has_advanced_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") == '1' for s in dataset.segments)
+        has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for s in dataset.segments)
+        has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for s in dataset.segments)
+        has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for s in dataset.segments)
+
+        all_workflows_in_dataset = {s.workflow_name for s in dataset.segments if s.workflow_name}
+        default_params_by_workflow = self.config.parameter_definitions
+
+        default_permnames_ordered = []
+        seen_permnames = set()
+
+        def add_unique(permnames):
+            for pname in permnames:
+                if pname not in seen_permnames:
+                    seen_permnames.add(pname)
+                    default_permnames_ordered.append(pname)
+
+        # Build the ordered list of default parameter names
+        add_unique(default_params_by_workflow.get('__GENERAL__', []))
+        for wf in sorted(list(all_workflows_in_dataset)):
+            add_unique(default_params_by_workflow.get(wf, []))
+        
+        if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames:
+            default_permnames_ordered.remove("Mode_ScanMode")
+
+        all_definitions_map = {p['permname']: p for p in self.config.all_definitions}
+        default_param_configs = []
+
+        # Filter and create final config list based on conditional logic
+        for pname in default_permnames_ordered:
+            if pname in ["calc_segment_start_time", "calc_segment_end_time"] and not has_multisegment_file: continue
+            if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue
+            if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue
+            if pname == 'IMSICC_Target' and not has_icc_mode1: continue
+            
+            mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"]
+            if pname in mode2_params and not has_icc_mode2: continue
+
+            param_config = all_definitions_map.get(pname)
+            if not param_config and pname.startswith("calc_"):
+                # Manually create definitions for calculated parameters
+                label_map = {"calc_scan_area_mz": "Window Scan Area", "calc_ramps": "Ramps per Cycle", "calc_ms1_scans": "MS1 Scans per Cycle", "calc_steps": "Isolation Steps per Cycle", "calc_mz_width": "Isolation Window Width", "calc_ce_ramping_start": "CE Ramping Start", "calc_ce_ramping_end": "CE Ramping End"}
+                label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title())
+                category = "Mode" if "Scan Mode" in label else "Calculated Parameters"
+                param_config = {"permname": pname, "label": label, "category": category}
+            
+            if param_config:
+                default_param_configs.append(param_config)
+        
+        return default_param_configs
 
     def _discover_available_parameters(self, xml_root: ET.Element) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Scans the method's XML to find all parameters that could be displayed.
+
+        Args:
+            xml_root (ET.Element): The root XML element of the method file.
+
+        Returns:
+            Tuple[List[Dict], List[Dict]]: A tuple containing two lists:
+                - The first list contains all default parameter definitions.
+                - The second list contains optional parameters that were found in the file.
+        """
         all_definitions = self.config.all_definitions
         
         defaults_by_workflow = self.config.parameter_definitions
@@ -64,18 +171,41 @@ class DataLoaderService:
         return available_defaults, available_optionals
 
     def load_dataset_from_folder(self, folder_path: str) -> Dataset:
+        """
+        Loads and parses a complete dataset from a given folder path.
+
+        This is the main public method for this service. It orchestrates file discovery,
+        XML parsing, segment processing, and final data model population.
+
+        Args:
+            folder_path (str): The path to the .d or .m method folder.
+
+        Returns:
+            Dataset: A populated Dataset object.
+
+        Raises:
+            MethodFileNotFoundError: If the main .method file cannot be found.
+            ParsingError: If the XML is malformed.
+            UnsupportedScanModeError: If a segment contains an unsupported scan mode.
+        """
+        self.logger.info(f"Attempting to load dataset from: {folder_path}")
         self._find_cache.clear()
         dataset = Dataset(key_path=folder_path)
         method_file = self._find_file(folder_path, ["microtofqimpactemacquisition.method"])
         if not method_file:
-            raise MethodFileNotFoundError(f"Could not find 'microtofqimpactemacquisition.method' in '{dataset.display_name}'.")
+            error_msg = f"Could not find 'microtofqimpactemacquisition.method' in '{dataset.display_name}'."
+            self.logger.error(error_msg)
+            raise MethodFileNotFoundError(error_msg)
+            
         dataset.method_file_path = method_file
         try:
             tree = ET.parse(method_file, parser=ET.XMLParser(encoding="iso-8859-1"))
             root = tree.getroot()
             dataset.xml_root = root
         except ET.ParseError as e:
-            raise ParsingError(f"Failed to parse XML in {os.path.basename(method_file)}: {e}")
+            error_msg = f"Failed to parse XML in {os.path.basename(method_file)}: {e}"
+            self.logger.error(error_msg, exc_info=True)
+            raise ParsingError(error_msg)
         
         default_params, optional_params = self._discover_available_parameters(root)
         dataset.default_params = default_params
@@ -112,27 +242,57 @@ class DataLoaderService:
                 if end_time >= 0:
                     last_end_time = end_time
                 last_segment_params = new_segment.parameters.copy()
+        
+        self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully with {len(dataset.segments)} segment(s).")
+
+        if ENABLE_DEBUG_LOGGING:
+            known_permnames_set = {p['permname'] for p in self.config.all_definitions}
+            total_known_permnames = len(known_permnames_set)
+            
+            self.logger.debug("--- Data Loading Summary for %s ---", dataset.display_name)
+            for i, segment in enumerate(dataset.segments):
+                found_with_values = sum(1 for p in segment.parameters if p in known_permnames_set)
+                
+                self.logger.debug(
+                    "  Segment %d: Found values for %d of %d known parameters.",
+                    i + 1,
+                    found_with_values,
+                    total_known_permnames
+                )
+            self.logger.debug("-------------------------------------------------")
+        
         return dataset
 
-    def _parse_and_populate_segment(self, new_segment: Segment, param_scope_element: ET.Element,
+    def _parse_and_populate_segment(self, segment: Segment, param_scope_element: ET.Element,
                                      instrument_scope_element: Optional[ET.Element],
                                      scan_mode_map: Dict, polarity_map: Dict, folder_path: str, previous_params: Dict):
         """
-        Parses parameters for a segment, robustly handling inheritance.
+        Parses parameters for a single segment, handling inheritance from previous segments.
+
+        Args:
+            segment (Segment): The Segment object to populate.
+            param_scope_element (ET.Element): The XML element representing the segment's scope.
+            instrument_scope_element (Optional[ET.Element]): The XML element for the instrument scope.
+            scan_mode_map (Dict): A map of scan mode IDs to names.
+            polarity_map (Dict): A map of polarity IDs to names.
+            folder_path (str): The root path of the dataset.
+            previous_params (Dict): A dictionary of parameters inherited from the previous segment.
         """
+        # Start with inherited parameters and remove calculated ones
         final_params = previous_params.copy()
-        
         keys_to_remove = [k for k in final_params if k.startswith("calc_")]
         keys_to_remove.append("Mode_ScanMode")
 
         for key in keys_to_remove:
             final_params.pop(key, None)
 
+        # Determine the correct ion polarity for this segment
         current_polarity_el = param_scope_element.find(f".//*[@permname='Mode_IonPolarity']")
         current_polarity_val = self._get_value_from_element(current_polarity_el, {})
         final_polarity_raw_val = final_params.get("Mode_IonPolarity", current_polarity_val)
         polarity_string = polarity_map.get(str(final_polarity_raw_val))
 
+        # Parse new values from the current segment's XML scope
         parsed_values = self._parse_parameters_for_scope(
             param_scope_element,
             instrument_scope_element,
@@ -140,26 +300,27 @@ class DataLoaderService:
             polarity_string
         )
         final_params.update(parsed_values)
+        segment.parameters = final_params
         
-        new_segment.parameters = final_params
-        
-        scan_mode_val = new_segment.parameters.get("Mode_ScanMode")
+        # Set the workflow name based on the scan mode
+        scan_mode_val = segment.parameters.get("Mode_ScanMode")
         try:
-            new_segment.scan_mode_id = int(scan_mode_val)
+            segment.scan_mode_id = int(scan_mode_val)
         except (ValueError, TypeError):
-            new_segment.scan_mode_id = None
+            segment.scan_mode_id = None
 
         workflow_name = scan_mode_map.get(str(scan_mode_val))
         if workflow_name is None:
-            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {new_segment.start_time:.2f} min.")
+            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {segment.start_time:.2f} min.")
             
-        new_segment.workflow_name = workflow_name
+        segment.workflow_name = workflow_name
         
-        self._perform_calculations(new_segment, folder_path, polarity_map)
-        self._apply_conditional_logic(new_segment)
+        self._perform_calculations(segment, folder_path, polarity_map)
+        self._apply_conditional_logic(segment)
 
     def _perform_calculations(self, segment: Segment, folder_path: str, polarity_map: Dict):
         """Centralized method for all post-parsing calculations for a segment."""
+        # General calculated parameters
         segment.parameters["calc_scan_mode"] = segment.workflow_name
         final_polarity_val = segment.parameters.get("Mode_IonPolarity")
         segment.ion_polarity = polarity_map.get(str(final_polarity_val), "Unknown").lower()
@@ -168,6 +329,7 @@ class DataLoaderService:
 
         self._calculate_energy_ramping_params(segment)
         
+        # Scan mode-specific data processing
         if segment.scan_mode_id == 6: # PASEF
             self._process_pasef_data(segment)
         elif segment.scan_mode_id == 9: # dia-PASEF
@@ -176,6 +338,8 @@ class DataLoaderService:
             self._process_diagonal_pasef_data(segment, folder_path)
 
     def _apply_conditional_logic(self, segment: Segment):
+        """Applies specific business logic rules to parameter values."""
+        # If Duty Cycle Lock is on, Accumulation Time is determined by Ramp Time.
         duty_cycle_lock = segment.parameters.get("IMS_imeX_DutyCycleLock")
         if duty_cycle_lock == "1":
             ramp_time_value = segment.parameters.get("IMS_imeX_RampTime")
@@ -183,6 +347,7 @@ class DataLoaderService:
                 segment.parameters["IMS_imeX_AccumulationTime"] = ramp_time_value
 
     def _get_value_from_element(self, element: Optional[ET.Element], config: Dict) -> Optional[Any]:
+        """Extracts a value from an XML element, handling single values and lists."""
         if element is None:
             return None
         entry_index = config.get("entry_index")
@@ -199,11 +364,20 @@ class DataLoaderService:
         return element.attrib.get("value")
 
     def _parse_parameters_for_scope(self, method_scope_element: ET.Element, instrument_scope_element: Optional[ET.Element], param_info: List[Dict], ion_polarity: Optional[str]) -> Dict:
+        """
+        Parses a list of parameters within a given XML scope, handling dependencies.
+
+        This complex method correctly resolves parameter values by:
+        - Searching in the correct scope (method vs. instrument).
+        - Handling polarity-dependent parameters.
+        - Resolving values for array parameters that depend on the value of another parameter.
+        """
         results = {}
         all_param_defs_map = {p['permname']: p for p in self.config.all_definitions}
         ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
 
         def find_and_get_value(p_config: Dict, current_results: Dict) -> Optional[Any]:
+            """Inner helper to find and extract a single parameter value."""
             permname = p_config.get('permname')
             if not permname:
                 return None
@@ -243,6 +417,7 @@ class DataLoaderService:
 
             return self._get_value_from_element(found_element, search_config)
 
+        # Process independent parameters first, then dependent ones, to ensure drivers are available.
         dependent_params = []
         independent_params = []
         for p in param_info:
@@ -265,6 +440,7 @@ class DataLoaderService:
         return results
 
     def _calculate_energy_ramping_params(self, segment: Segment):
+        """Calculates and formats collision energy ramping parameters for display."""
         is_advanced_str = segment.parameters.get("Energy_Ramping_Advanced_Settings_Active")
         is_advanced = (is_advanced_str == '1')
         segment.parameters["calc_advanced_ce_ramping_display_list"] = None
@@ -317,6 +493,7 @@ class DataLoaderService:
             segment.parameters["calc_ce_ramping_end"] = "N/A"
 
     def _process_pasef_data(self, segment: Segment):
+        """Extracts the PASEF polygon data and calculates the cycle time."""
         mass_values_str = segment.parameters.get("IMS_PolygonFilter_Mass")
         mobility_values_str = segment.parameters.get("IMS_PolygonFilter_Mobility")
         
@@ -342,6 +519,7 @@ class DataLoaderService:
             segment.parameters["calc_cycle_time"] = "N/A"
             
     def _process_dia_pasef_data(self, segment: Segment, search_path: str):
+        """Loads dia-PASEF window data from the diasettings.diasqlite file and calculates parameters."""
         sqlite_file = self._find_file(search_path, ["diasettings.diasqlite"])
         if not sqlite_file: 
             self._initialize_dia_params_as_na(segment)
@@ -405,6 +583,7 @@ class DataLoaderService:
         segment.dia_windows_data = df_prepared
 
     def _initialize_dia_params_as_na(self, segment: Segment, ms1_scans_only=False):
+        """Sets all dia-PASEF calculated parameters to 'N/A'."""
         if not ms1_scans_only: segment.parameters["calc_ms1_scans"] = "N/A"
         segment.parameters["calc_ramps"] = "N/A"
         segment.parameters["calc_steps"] = "N/A"
@@ -414,6 +593,7 @@ class DataLoaderService:
         segment.parameters["calc_cycle_time"] = "N/A"
 
     def _process_diagonal_pasef_data(self, segment: Segment, search_path: str):
+        """Loads diagonal-PASEF data from synchroSettings.syncsqlite and calculates parameters."""
         sqlite_file = self._find_file(search_path, ["synchroSettings.syncsqlite"])
         if not sqlite_file: return
         try:
@@ -453,8 +633,7 @@ class DataLoaderService:
                         mz_end_last_slice = mz_start_last_slice + isolation_mz
                         segment.parameters["calc_scan_area_mz"] = f"{mz_start_first_slice:.2f} m/z - {mz_end_last_slice:.2f} m/z"
                     except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e:
-                        if ENABLE_DEBUG_LOGGING:
-                            print(f"[DEBUG] Could not calculate diagonal-PASEF scan area m/z: {e}")
+                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z: %s", e)
                         segment.parameters["calc_scan_area_mz"] = "N/A"    
                         
                 try:
@@ -466,10 +645,10 @@ class DataLoaderService:
                 except (ValueError, TypeError, AttributeError):
                     segment.parameters["calc_cycle_time"] = "N/A"
         except Exception as e:
-            if ENABLE_DEBUG_LOGGING:
-                print(f"[DEBUG] Failed to process diagonal-PASEF data: {e}")
+            self.logger.debug("Failed to process diagonal-PASEF data: %s", e)
     
     def _find_file(self, start_folder: str, file_patterns: List[str]) -> Optional[str]:
+        """Recursively finds the first file in a directory that matches a pattern."""
         for root, _, files in os.walk(start_folder):
             for file in files:
                 for pattern in file_patterns:
@@ -478,6 +657,13 @@ class DataLoaderService:
         return None
     
     def parse_additional_parameters(self, dataset: Dataset, additional_params_info: List[Dict]):
+        """
+        Parses a specific list of additional parameters for an already loaded dataset.
+
+        Args:
+            dataset (Dataset): The dataset object to update.
+            additional_params_info (List[Dict]): A list of parameter definitions to parse.
+        """
         if not hasattr(dataset, 'xml_root') or not additional_params_info:
             return
         instrument_scope_element = dataset.xml_root.find('instrument')
@@ -510,7 +696,7 @@ class DataLoaderService:
 
 
 class PlottingService:
-    """Handles the creation and rendering of all plots for the UI."""
+    """Handles the creation and rendering of all plots for the UI and reports."""
     
     def generate_plot_as_buffer(self, dataset: Dataset, width_px: int, height_px: int, bg_color: str = "#E4EFF7", for_report: bool = False, dpi: int = 100, show_filename: bool = True) -> Optional[io.BytesIO]:
         """
@@ -531,19 +717,30 @@ class PlottingService:
         
         scan_mode_id = active_segment.scan_mode_id
         if scan_mode_id == 9 and active_segment.dia_windows_data is not None: # dia-PASEF
-            fig, _ = self._draw_dia_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report)
+            fig, _ = self._draw_dia_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False)
         elif scan_mode_id == 11 and active_segment.diagonal_pasef_data is not None: # diagonal-PASEF
-            fig, _ = self._draw_diagonal_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report)
+            fig, _ = self._draw_diagonal_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False)
         elif scan_mode_id == 6 and active_segment.pasef_polygon_data: # PASEF
-            fig, _ = self._draw_pasef_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report)
+            fig, _ = self._draw_pasef_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False)
         
         if fig:
             if for_report:
                 fig.subplots_adjust(left=0.15, right=0.95, bottom=0.22, top=0.85)
-            return self._render_figure_to_buffer(fig, dpi)
+            return self._render_figure_to_buffer(fig, dpi, 'png')
         return None
         
     def create_plot_image(self, dataset: Dataset, width_px: int, height_px: int) -> Optional[ctk.CTkImage]:
+        """
+        Generates a plot as a PNG buffer and converts it to a CTkImage for the UI.
+
+        Args:
+            dataset (Dataset): The dataset to plot.
+            width_px (int): The desired width of the plot in pixels.
+            height_px (int): The desired height of the plot in pixels.
+
+        Returns:
+            Optional[ctk.CTkImage]: The generated plot as a CustomTkinter image object.
+        """
         plot_buffer = self.generate_plot_as_buffer(dataset, width_px, height_px)
         if plot_buffer:
             image = Image.open(plot_buffer)
@@ -552,14 +749,19 @@ class PlottingService:
             return ctk.CTkImage(light_image=image, dark_image=image, size=(image.width, image.height))
         return None
 
-    def _setup_plot(self, width_px: int, height_px: int, title: str, bg_color: str, for_report: bool = False) -> Tuple[plt.Figure, plt.Axes]:
+    def _setup_plot(self, width: float, height: float, title: str, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Tuple[plt.Figure, plt.Axes]:
+        """Creates and styles a Matplotlib figure and axes for plotting."""
         if for_report:
-            title_fs, label_fs, tick_fs = 28, 24, 20
+            title_fs, label_fs, tick_fs = 14, 12, 10
         else:
             title_fs, label_fs, tick_fs = 9, 8, 7
-            
+        
+        figsize = (width, height)
         dpi = 100
-        fig, ax = plt.subplots(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+        if not is_vector:
+            figsize = (width / dpi, height / dpi)
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         
         fig.set_facecolor(bg_color)
         ax.set_facecolor(bg_color)
@@ -567,36 +769,39 @@ class PlottingService:
         ax.set_xlabel('m/z', color='#04304D', fontsize=label_fs)
         ax.set_ylabel('1/K0', color='#04304D', fontsize=label_fs)
         
-        max_len = int(width_px / (label_fs * 0.8))
+        max_len = int(width * 10) if is_vector else int(width / (label_fs * 0.8))
         final_title = self._truncate_middle(title, max_len)
-        ax.set_title(final_title, color='#04304D', fontsize=title_fs, pad=15 if for_report else 5)
+        ax.set_title(final_title, color='#04304D', fontsize=title_fs, pad=10 if for_report else 5)
         
         ax.tick_params(axis='both', colors='#04304D', labelcolor='#04304D', labelsize=tick_fs, pad=5)
         for spine in ax.spines.values():
             spine.set_edgecolor('#04304D')
-            spine.set_linewidth(1.5 if for_report else 1.0)
+            spine.set_linewidth(1.0 if for_report else 0.8)
             
         fig.subplots_adjust(left=0.18, bottom=0.22, right=0.98, top=0.85)
         return fig, ax
 
-    def _render_figure_to_buffer(self, fig: plt.Figure, dpi: int) -> io.BytesIO:
+    def _render_figure_to_buffer(self, fig: plt.Figure, dpi: int, fmt: str) -> io.BytesIO:
+        """Renders a Matplotlib figure to an in-memory buffer."""
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', facecolor=fig.get_facecolor(), dpi=dpi)
+        fig.savefig(buf, format=fmt, facecolor=fig.get_facecolor(), dpi=dpi, bbox_inches='tight')
         buf.seek(0)
         plt.close(fig)
         return buf
 
     def _truncate_middle(self, text: str, max_len: int) -> str:
+        """Truncates a string in the middle, preserving the start and end."""
         if len(text) <= max_len or max_len < 5: 
             return text
         part_len = (max_len - 3) // 2
         return f"{text[:part_len]}...{text[-part_len:]}"
 
-    def _draw_dia_plot_figure(self, segment: Segment, title: str, width_px: int, height_px: int, bg_color: str, for_report: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+    def _draw_dia_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+        """Draws the scan geometry for a dia-PASEF method."""
         df_prepared = segment.dia_windows_data
         if df_prepared is None or df_prepared.empty or 'CycleId' not in df_prepared.columns:
             return None
-        fig, ax = self._setup_plot(width_px, height_px, title, bg_color, for_report)
+        fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector)
         unique_cycles = df_prepared['CycleId'].unique()
         colors = plt.cm.viridis_r(np.linspace(0, 1, len(unique_cycles)))
         cycle_color_map = dict(zip(unique_cycles, colors))
@@ -609,7 +814,8 @@ class PlottingService:
         ax.autoscale_view()
         return fig, ax
 
-    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width_px: int, height_px: int, bg_color: str, for_report: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+        """Draws the scan geometry for a diagonal-PASEF method."""
         p = segment.diagonal_pasef_data
         if p is None: return None
         slope, origin = p['slope'], p['origin']
@@ -619,7 +825,7 @@ class PlottingService:
         measured_mobility_end = segment.parameters.get("calc_im_end")
         if measured_mobility_start is None or measured_mobility_end is None: return None
         if slope == 0: return None
-        fig, ax = self._setup_plot(width_px, height_px, title, bg_color, for_report)
+        fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector)
         colors = plt.cm.viridis_r(np.linspace(0, 1, num_slices))
         center_mz1, center_mz2 = (measured_mobility_start - origin) / slope, (measured_mobility_end - origin) / slope
         pattern_start1, pattern_start2 = center_mz1 - (total_pattern_width_mz / 2), center_mz2 - (total_pattern_width_mz / 2)
@@ -642,39 +848,148 @@ class PlottingService:
         ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer)
         return fig, ax
 
-    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width_px: int, height_px: int, bg_color: str, for_report: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+        """Draws the scan geometry for a PASEF method."""
         if not segment.pasef_polygon_data: return None
         mass_coords, mobility_coords = segment.pasef_polygon_data
         if not mass_coords or not mobility_coords or len(mass_coords) != len(mobility_coords): return None
         polygon_points = list(zip(mass_coords, mobility_coords))
-        fig, ax = self._setup_plot(width_px, height_px, title, bg_color, for_report)
+        fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector)
         polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7)
         ax.add_patch(polygon)
         ax.autoscale_view()
         return fig, ax
 
+    def generate_plot_as_svg_buffer(self, dataset: Dataset, width_in: float, height_in: float, bg_color: str = "white", show_filename: bool = True) -> Optional[io.BytesIO]:
+        """
+        Generates a high-quality SVG plot for reports and returns it as a BytesIO buffer.
+        """
+        try:
+            active_segment = dataset.segments[dataset.active_segment_index]
+        except IndexError:
+            return None
+
+        if len(dataset.segments) > 1:
+            segment_info = f"Segment {dataset.active_segment_index + 1}"
+            title = f"{dataset.display_name} ({segment_info})" if show_filename else segment_info
+        else:
+            title = dataset.display_name if show_filename else "Scan Geometry"
+
+        fig = None
+        
+        scan_mode_id = active_segment.scan_mode_id
+        if scan_mode_id == 9 and active_segment.dia_windows_data is not None:
+            fig, _ = self._draw_dia_plot_figure(active_segment, title, width_in, height_in, bg_color, True, True)
+        elif scan_mode_id == 11 and active_segment.diagonal_pasef_data is not None:
+            fig, _ = self._draw_diagonal_plot_figure(active_segment, title, width_in, height_in, bg_color, True, True)
+        elif scan_mode_id == 6 and active_segment.pasef_polygon_data:
+            fig, _ = self._draw_pasef_plot_figure(active_segment, title, width_in, height_in, bg_color, True, True)
+        
+        if fig:
+            fig.subplots_adjust(left=0.15, right=0.95, bottom=0.22, top=0.85)
+            return self._render_figure_to_buffer(fig, 0, 'svg')
+        return None
+
 
 class ReportGeneratorService:
     """Handles the logic for creating and exporting method reports."""
-    def __init__(self, plotting_service: PlottingService, config: AppConfig):
+    def __init__(self, plotting_service: PlottingService, config: AppConfig, loader_service: DataLoaderService):
+        """Initializes the ReportGeneratorService."""
         self.plotting_service = plotting_service
         self.config = config
+        self.loader = loader_service
+        self.logger = logging.getLogger(__name__)
 
     def generate_report(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], 
-                        export_format: str, file_path: str, show_filename: bool, include_plot: bool):
-        
+                        export_format: str, file_path: str, show_filename: bool, include_plot: bool,
+                        progress_callback: Optional[Callable] = None):
+        """
+        Generates a report file (PDF or CSV) based on user selections.
+
+        This method is designed to be called from a background thread. It reports
+        its progress via the provided callback function.
+
+        Args:
+            dataset (Dataset): The dataset to report on.
+            selected_segment_indices (List[int]): Indices of segments to include.
+            params_to_include (List[Dict]): Ordered list of parameter definitions to include.
+            export_format (str): The format ('pdf' or 'csv').
+            file_path (str): The path to save the generated file.
+            show_filename (bool): Whether to include the filename in the PDF header/plot.
+            include_plot (bool): Whether to include a plot in the PDF.
+            progress_callback (Optional[Callable]): A function to call with progress updates.
+                                                   It accepts (increment, message).
+        """
         permnames_in_report = {p['permname'] for p in params_to_include}
         if "calc_scan_mode" in permnames_in_report and "Mode_ScanMode" in permnames_in_report:
             params_to_include = [p for p in params_to_include if p['permname'] != "Mode_ScanMode"]
 
         if export_format == 'csv':
+            if progress_callback: progress_callback(1, "Preparing data for CSV...")
             self._generate_csv(dataset, selected_segment_indices, params_to_include, file_path)
+            if progress_callback: progress_callback(1, "CSV export complete.")
         elif export_format == 'pdf':
-            self._generate_pdf(dataset, selected_segment_indices, params_to_include, file_path, show_filename, include_plot)
+            self._generate_pdf(dataset, selected_segment_indices, params_to_include, file_path, show_filename, include_plot, progress_callback)
+
+    def _get_default_param_configs_for_dataset(self, dataset: Dataset) -> List[Dict]:
+        """
+        Gets the default parameter configurations for all active workflows in a dataset.
+        """
+        if not dataset or not dataset.segments:
+            return []
+
+        has_multisegment_file = len(dataset.segments) > 1
+        has_advanced_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") == '1' for s in dataset.segments)
+        has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for s in dataset.segments)
+        has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for s in dataset.segments)
+        has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for s in dataset.segments)
+
+        all_workflows_in_dataset = {s.workflow_name for s in dataset.segments if s.workflow_name}
+        default_params_by_workflow = self.config.parameter_definitions
+
+        default_permnames_ordered = []
+        seen_permnames = set()
+
+        def add_unique(permnames):
+            for pname in permnames:
+                if pname not in seen_permnames:
+                    seen_permnames.add(pname)
+                    default_permnames_ordered.append(pname)
+
+        add_unique(default_params_by_workflow.get('__GENERAL__', []))
+        for wf in sorted(list(all_workflows_in_dataset)):
+            add_unique(default_params_by_workflow.get(wf, []))
+        
+        if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames:
+            default_permnames_ordered.remove("Mode_ScanMode")
+
+        all_definitions_map = {p['permname']: p for p in self.config.all_definitions}
+        default_param_configs = []
+
+        for pname in default_permnames_ordered:
+            if pname in ["calc_segment_start_time", "calc_segment_end_time"] and not has_multisegment_file: continue
+            if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue
+            if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue
+            if pname == 'IMSICC_Target' and not has_icc_mode1: continue
+            
+            mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"]
+            if pname in mode2_params and not has_icc_mode2: continue
+
+            param_config = all_definitions_map.get(pname)
+            if not param_config and pname.startswith("calc_"):
+                label_map = {"calc_scan_area_mz": "Window Scan Area", "calc_ramps": "Ramps per Cycle", "calc_ms1_scans": "MS1 Scans per Cycle", "calc_steps": "Isolation Steps per Cycle", "calc_mz_width": "Isolation Window Width", "calc_ce_ramping_start": "CE Ramping Start", "calc_ce_ramping_end": "CE Ramping End"}
+                label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title())
+                category = "Mode" if "Scan Mode" in label else "Calculated Parameters"
+                param_config = {"permname": pname, "label": label, "category": category}
+            
+            if param_config:
+                default_param_configs.append(param_config)
+        
+        return default_param_configs
 
     def _prepare_data_for_segment(self, dataset: Dataset, segment_index: int, params_to_include: List[Dict]) -> pd.DataFrame:
         """
-        Prepares a DataFrame for a given segment using the provided list of parameters.
+        Prepares a DataFrame of parameter data for a single segment.
         """
         report_data = []
         segment = dataset.segments[segment_index]
@@ -704,8 +1019,8 @@ class ReportGeneratorService:
 
         return pd.DataFrame(report_data)
 
-
     def _generate_csv(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], file_path: str):
+        """Generates the report in CSV format."""
         all_data = []
         for index in selected_segment_indices:
             df = self._prepare_data_for_segment(dataset, index, params_to_include)
@@ -724,9 +1039,17 @@ class ReportGeneratorService:
         final_df.to_csv(file_path, index=False, encoding='utf-8')
 
     def _generate_pdf(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], 
-                      file_path: str, show_filename: bool, include_plot: bool):
+                      file_path: str, show_filename: bool, include_plot: bool, progress_callback: Optional[Callable] = None):
+        """
+        Generates a professional, multi-page PDF report.
+        
+        This method uses a nested class that inherits from FPDF to handle the
+        complex layout, including a two-column design, themed headers, page
+        numbering, and embedding of high-quality SVG plots.
+        """
         
         class ReportPDF(FPDF):
+            """A custom FPDF class to handle the complex layout of the method report."""
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.set_auto_page_break(auto=True, margin=15)
@@ -764,13 +1087,11 @@ class ReportGeneratorService:
                 for category_name, group in data.groupby('Category', sort=False):
                     if group.empty:
                         continue
-                    # Pass a fresh copy of the group with a reset index
                     self._draw_group(category_name, group.reset_index(drop=True))
 
             def _draw_group(self, category_name: str, group: pd.DataFrame):
                 header_h = 7
                 
-                # Check if there is enough space for the header and at least one row
                 if self.col_y[self.current_col] + header_h + 10 > self.page_break_trigger:
                     self._switch_column()
                 
@@ -781,7 +1102,6 @@ class ReportGeneratorService:
             
             def _switch_column(self):
                 self.current_col = 1 - self.current_col
-                # If we've switched back to the left column, we need a new page
                 if self.current_col == 0:
                     self.add_page()
                     self.start_columns()
@@ -802,7 +1122,6 @@ class ReportGeneratorService:
                 self.set_text_color(255, 255, 255)
                 self.cell(self.col_width, header_h, f" {text}", 0, 0, "L", fill=True)
                 
-                # Update the Y position for the current column
                 self.col_y[self.current_col] = self.get_y() + header_h
 
             def _get_line_count(self, text: str, width: float) -> int:
@@ -841,12 +1160,10 @@ class ReportGeneratorService:
                 x_pos = self.l_margin if self.current_col == 0 else self.l_margin + self.col_width + self.gutter
                 start_y = self.col_y[self.current_col]
 
-                # --- Font and Color Reset ---
                 self.set_font("Helvetica", "", 8)
                 self.set_text_color(0, 0, 0)
                 self.set_draw_color(211, 211, 211)
                 
-                # --- Background and Borders ---
                 is_striped = (row_index % 2 == 1)
                 fill_color = (240, 240, 240) if is_striped else (255, 255, 255)
                 self.set_fill_color(*fill_color)
@@ -854,7 +1171,6 @@ class ReportGeneratorService:
                 self.rect(x_pos, start_y, self.col_width, row_height)
                 self.line(x_pos + param_col_w, start_y, x_pos + param_col_w, start_y + row_height)
 
-                # --- Draw Text ---
                 self.set_xy(x_pos, start_y)
                 self.multi_cell(param_col_w, line_h, f" {str(row_data['Parameter'])}", 0, "L")
                 self.set_xy(x_pos + param_col_w, start_y)
@@ -863,6 +1179,7 @@ class ReportGeneratorService:
                 self.col_y[self.current_col] = start_y + row_height
                 self.set_y(self.col_y[self.current_col])
         
+        if progress_callback: progress_callback(1, "Initializing PDF...")
         pdf = ReportPDF()
         pdf.alias_nb_pages()
         pdf.add_page()
@@ -894,26 +1211,31 @@ class ReportGeneratorService:
                 pdf.ln(2)
             
             if include_plot:
+                if progress_callback: progress_callback(0, f"Generating vector plot for segment {index+1}...")
+                
                 original_active_index = dataset.active_segment_index
                 dataset.active_segment_index = index
                 
-                plot_width_px = 2400
-                plot_height_px = int(plot_width_px * (320 / 800))
-                
-                plot_buffer = self.plotting_service.generate_plot_as_buffer(
-                    dataset, width_px=plot_width_px, height_px=plot_height_px, 
-                    bg_color="white", for_report=True, dpi=300,
+                page_width_mm = pdf.w - pdf.l_margin - pdf.r_margin
+                plot_width_in = page_width_mm / 25.4
+                plot_height_in = plot_width_in * 0.4
+
+                svg_buffer = self.plotting_service.generate_plot_as_svg_buffer(
+                    dataset,
+                    width_in=plot_width_in,
+                    height_in=plot_height_in,
                     show_filename=show_filename
                 )
                 
                 dataset.active_segment_index = original_active_index
-                if plot_buffer:
-                    page_width_plot = pdf.w - pdf.l_margin - pdf.r_margin
-                    plot_height = (page_width_plot / plot_width_px) * plot_height_px
-                    pdf.image(plot_buffer, x=pdf.l_margin, y=pdf.get_y(), w=page_width_plot, h=plot_height)
-                    pdf.set_y(pdf.get_y() + plot_height + 5)
-                    plot_buffer.close()
 
+                if progress_callback: progress_callback(1, "Embedding plot...")
+                if svg_buffer:
+                    pdf.image(svg_buffer, w=page_width_mm)
+                    pdf.ln(5)
+                    svg_buffer.close()
+            
+            if progress_callback: progress_callback(1, f"Drawing table for segment {index+1}...")
             pdf.start_columns()
             data_df = self._prepare_data_for_segment(dataset, index, params_to_include)
             
@@ -937,4 +1259,5 @@ class ReportGeneratorService:
             pdf.draw_table(data_df)
             pdf.set_y(max(pdf.col_y))
 
+        if progress_callback: progress_callback(1, "Saving final PDF...")
         pdf.output(file_path)

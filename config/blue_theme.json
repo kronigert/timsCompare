@@ -26,6 +26,13 @@
         "text_color": "#E4EFF7",
         "text_color_disabled": "#C7D2D9"
     },
+    "CTkProgressBar": {
+    "fg_color": ["#AAB0B5", "#5F6469"],
+    "border_color": ["#AAB0B5", "#5F6469"],
+    "progress_color": ["#3B8ED0", "#3B8ED0"],
+    "border_width": 0,
+    "corner_radius": 10
+    },
     "CTkCheckBox": {
         "corner_radius": 6,
         "border_width": 1,
