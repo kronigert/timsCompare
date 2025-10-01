@@ -75,7 +75,7 @@ This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and a
 ---
 ## Disclaimer
 
-Disclaimer: This is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
+This is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
 
 ## License
 
