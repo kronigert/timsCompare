@@ -73,6 +73,9 @@ This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and a
 5. Exported diagonal-PASEF and dia-PASEF windows can directly be imported into timsControl. For PASEF methods, the polygon has to be created manually in timsControl using the x,y coordinates from the exported .txt
 
 ---
+##Disclaimer
+
+Disclaimer: This is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
 
 ## License
 
