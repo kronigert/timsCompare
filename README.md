@@ -14,28 +14,27 @@ A Python desktop application for mass spectrometry users to load, view, compare,
 
 **timsCompare** is a desktop application developed for mass spectrometry users to efficiently analyze instrument method files. Built with Python and customtkinter, it provides an intuitive graphical interface to parse, visualize, and compare metadata from Bruker's `.d` and `.m` method directories.
 
-The application specializes in handling various acquisition modes, including PASEF, dia-PASEF, bbCID, MRM, and more. It correctly parses multi-segment methods, allowing for detailed analysis of experiments where parameters change over time.
+The application specializes in handling various acquisition modes, including PASEF, dia-PASEF, diagonal-PASEF, and more.
 
 ### Key Features
 
 * **Side-by-Side Comparison:** Load multiple methods and compare their parameters in a clear, tabular format that highlights differences.
-* **Multi-Segment Analysis:** Automatically parses and displays methods with multiple timed segments.
-* **Graphical Visualization:** Generates plots of scan geometries for PASEF, dia-PASEF, and diagonal-PASEF methods.
+* **Multi-Segment Analysis:** Automatically parses and displays methods with multiple segments.
+* **Graphical Visualization:** Generates plots of isolation schemes for PASEF, dia-PASEF, and diagonal-PASEF methods.
 * **Method Reports:** Export detailed, multi-page PDF or CSV reports with a clean two-column layout for documentation or publications.
-* **Data Export:** Export scan window tables (e.g., dia-PASEF windows, diagonal-PASEF, PASEF polygons) to text files. Exported dia-PASEF and diagonal-PASEF windows can be imported into timsControl directly.
-* **Modern UI:** A clean, icon-driven user interface that is easy to navigate.
+* **Data Export:** Export scan window tables (e.g., dia-PASEF windows, diagonal-PASEF, PASEF polygons) to text files. Exported dia-PASEF and diagonal-PASEF windows can be directly imported into timsControl.
 
 ---
 
 ## Getting Started
 
-The recommended way to use timsCompare is to download the pre-compiled application.
+The recommended way to use timsCompare is to download the pre-compiled installer via the release page.
 
 ### Installation
 
 1.  **Download:** Go to the [**Releases Page**](https://github.com/kronigert/timsCompare/releases) and download the `timsCompare-vX.X.zip` file from the latest release.
-2.  **Extract:** Unzip the downloaded file to a permanent location on your computer (e.g., your Desktop or Program Files).
-3.  **Run:** Open the extracted folder and double-click the **`timsCompare.exe`** file to start the application. You may wish to create a shortcut to this file for easier access.
+2.  **Extract:** Unzip the downloaded file and run the installer.
+3.  **Run:** Open timsCompare from the start menu or a shortcut to start the application.
 
 ---
 

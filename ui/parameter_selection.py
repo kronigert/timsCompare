@@ -1,10 +1,5 @@
-"""
-Defines the parameter selection dialog for the timsCompare application.
+# ui/parameter_selection.py
 
-This module contains the `ParameterSelectionWindow`, a modal dialog that allows
-users to interactively search, filter, and select parameters to be displayed
-in the main application's comparison view.
-"""
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -12,100 +7,71 @@ import customtkinter as ctk
 from typing import Optional, List, Dict, Set
 from PIL import Image, ImageTk
 import logging
+import copy
 
 from data_model import Dataset
-from utils import format_parameter_value, resource_path
+from services import DataLoaderService
+from utils import format_parameter_value, resource_path, apply_dark_title_bar
 
 
 class ParameterSelectionWindow(ctk.CTkToplevel):
-    """
-    A modal dialog window for searching, filtering, and selecting additional
-    parameters to display in the main comparison table.
-    """
-    def __init__(self, master, dataset: Dataset, all_params: List, previously_selected_params: List):
-        """
-        Initializes the ParameterSelectionWindow dialog.
-
-        Args:
-            master: The parent widget, typically the main application window.
-            dataset (Dataset): The primary dataset used to display current values
-                               for parameters in the list.
-            all_params (List): A list of all available parameter definition
-                               dictionaries.
-            previously_selected_params (List): A list of parameter definitions that
-                                               are already selected, to set the
-                                               initial state of the checkboxes.
-        """
+    def __init__(self, master, loader_service: DataLoaderService, dataset: Dataset, 
+                 all_params: List, all_sources: List, previously_selected_params: List):
         super().__init__(master)
         
-        self.bind("<Map>", self._set_icon)
+        self.bind("<Map>", self._on_map)
         
-        # --- Window Configuration ---
-        self.transient(master)  # Keep window on top of the parent
-        self.grab_set()  # Make the dialog modal
+        self.transient(master)
+        self.grab_set()
         self.title("Add Additional Parameters")
-        self.geometry("1050x700")
+        self.geometry("1200x700")
 
-        # --- State Variables ---
+        self.loader_service = loader_service
         self.dataset = dataset
         self.all_parameters = all_params
-        self.final_selection: Optional[List[Dict]] = None # Stores the result after 'Apply' is clicked
+        self.all_sources = all_sources
+        self.final_selection: Optional[List[Dict]] = None
         self.all_categories = sorted(list(set(p.get('category', 'General') for p in self.all_parameters)))
 
-        # A set of unique parameter keys representing the current selection
         self.selection_state: Set[str] = {self._get_param_key(p) for p in previously_selected_params}
+        self.source_var = ctk.StringVar()
 
-        # --- Image References ---
         self.checked_img = None
         self.unchecked_img = None
-        self.icon_image_ref = None # To prevent garbage collection of the window icon
 
-        # --- UI Initialization ---
         self._load_and_anchor_images()
         self._create_widgets()
         self._update_list()
     
-    def _set_icon(self, event=None):
-        """
-        Loads and sets the Toplevel window icon.
-        
-        This method is bound to the <Map> event to ensure the icon is set
-        reliably when the window is displayed. It keeps a reference to the
-        ImageTk object to prevent garbage collection.
-        """
-        try:
-            logger = logging.getLogger(__name__)
-            icon_path = resource_path("assets/icon.ico")
-            image = Image.open(icon_path)
-            icon_image = ImageTk.PhotoImage(image)
+    def _on_map(self, event=None):
+        apply_dark_title_bar(self)
 
-            # Keep a reference to prevent garbage collection
-            self.icon_image_ref = icon_image
+        def set_icon():
+            try:
+                icon_path = resource_path("assets/icon.ico")
 
-            self.iconphoto(False, icon_image)
-        except Exception as e:
-            logger.warning(f"Could not set Toplevel window icon: {e}")
-    
+                image = Image.open(icon_path)
+                icon_image = ImageTk.PhotoImage(image)
+
+                setattr(self.master, f"_icon_image_ref_{self.winfo_id()}", icon_image)
+
+                self.iconphoto(False, icon_image)
+
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Could not set Toplevel window icon: {e}")
+
+        self.after(100, set_icon)
+
     def _load_and_anchor_images(self):
-        """
-        Loads checkbox images and anchors them to the master widget.
-
-        This robustly prevents the images from being garbage-collected by Python,
-        a common issue in Tkinter when references are not maintained at a stable
-        scope. It uses a shared dictionary on the master window to cache the
-        images, avoiding redundant file loads if the dialog is opened multiple
-        times.
-        """
         try:
-            # Check if images are already cached on the master window
             if hasattr(self.master, '_image_references') and \
                'param_dialog_checked' in self.master._image_references:
                 self.checked_img = self.master._image_references['param_dialog_checked']
                 self.unchecked_img = self.master._image_references['param_dialog_unchecked']
                 return
 
-            # Construct path to assets folder
-            assets_path = resource_path("assets")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            assets_path = os.path.join(script_dir, "..", "assets")
 
             checked_path = os.path.join(assets_path, "checkbox_checked.png")
             unchecked_path = os.path.join(assets_path, "checkbox_unchecked.png")
@@ -122,7 +88,6 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             self.checked_img = checked_img_obj
             self.unchecked_img = unchecked_img_obj
 
-            # Anchor references to the main application window to prevent garbage collection
             if not hasattr(self.master, '_image_references'):
                 self.master._image_references = {}
             self.master._image_references['param_dialog_checked'] = checked_img_obj
@@ -136,26 +101,24 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             )
 
     def _create_widgets(self):
-        """Creates and lays out all the widgets for the dialog."""
         main_frame = ctk.CTkFrame(self, fg_color=self.cget("fg_color"))
         main_frame.pack(padx=10, pady=10, fill="both", expand=True)
         main_frame.grid_columnconfigure(0, weight=1)
         main_frame.grid_rowconfigure(1, weight=1)
 
-        # --- Top Filter Frame ---
         filter_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         filter_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        filter_frame.grid_columnconfigure(1, weight=1) # Search entry
-        filter_frame.grid_columnconfigure(3, weight=1) # Category dropdown
 
-        # Search Bar
+        filter_frame.grid_columnconfigure(1, weight=1)
+        filter_frame.grid_columnconfigure(3, weight=1)
+        filter_frame.grid_columnconfigure(5, weight=1)
+
         ctk.CTkLabel(filter_frame, text="Search:", text_color="#E4EFF7").grid(row=0, column=0, padx=(10,5), pady=5)
         self.search_var = ctk.StringVar()
         self.search_entry = ctk.CTkEntry(filter_frame, textvariable=self.search_var)
         self.search_entry.grid(row=0, column=1, padx=(0,10), pady=5, sticky="ew")
         self.search_var.trace_add("write", lambda *args: self._update_list())
 
-        # Category Filter Dropdown
         ctk.CTkLabel(filter_frame, text="Group:", text_color="#E4EFF7").grid(row=0, column=2, padx=(10,5), pady=5)
         self.category_filter = ctk.CTkOptionMenu(
             filter_frame,
@@ -163,51 +126,59 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             command=self._update_list
         )
         self.category_filter.grid(row=0, column=3, padx=(0,10), pady=5, sticky="ew")
+        
+        ctk.CTkLabel(filter_frame, text="Source:", text_color="#E4EFF7").grid(row=0, column=4, padx=(10,5), pady=5)
+        self.source_filter = ctk.CTkOptionMenu(
+            filter_frame,
+            values=self.all_sources if self.all_sources else ["-"],
+            variable=self.source_var,
+            command=self._update_list
+        )
 
-        # Select/Deselect All Buttons
+        if "captivespray" in self.all_sources:
+            self.source_var.set("captivespray")
+        elif self.all_sources:
+            self.source_var.set(self.all_sources[0])
+
+        self.source_filter.grid(row=0, column=5, padx=(0,10), pady=5, sticky="ew")
+        if not self.all_sources:
+            self.source_filter.configure(state="disabled")
+
         selection_button_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
-        selection_button_frame.grid(row=0, column=4, padx=(5, 10))
+        selection_button_frame.grid(row=0, column=6, padx=(5, 10))
+
         self.select_all_button = ctk.CTkButton(selection_button_frame, text="Select All", width=100, command=self._select_all_visible)
         self.select_all_button.pack(side="left", padx=(0, 5))
+
         self.deselect_all_button = ctk.CTkButton(selection_button_frame, text="Deselect All", width=100, command=self._deselect_all_visible)
         self.deselect_all_button.pack(side="left")
 
-        # --- Parameter List (Treeview) ---
         tree_frame = ctk.CTkFrame(main_frame, fg_color="#E4EFF7", corner_radius=6)
         tree_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         tree_frame.pack_propagate(False)
 
         self.tree = ttk.Treeview(tree_frame, columns=('Category', 'Value'), show="tree headings")
         self.tree.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+
         self.tree.bind("<ButtonPress-1>", self._on_click)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        vsb = ctk.CTkScrollbar(tree_frame, command=self.tree.yview)
         vsb.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=vsb.set)
 
-        # Configure Treeview columns
         self.tree.heading('#0', text='Parameter'); self.tree.column('#0', anchor='w', width=400)
         self.tree.heading('Category', text='Group'); self.tree.column('Category', anchor='w', width=200)
         self.tree.heading('Value', text='Value'); self.tree.column('Value', anchor='w', width=150)
 
-        # Configure row styles for alternating colors
         self.tree.tag_configure('oddrow', background='#E4EFF7')
         self.tree.tag_configure('evenrow', background='#FFFFFF')
 
-        # --- Bottom Action Buttons ---
         button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         button_frame.grid(row=2, column=0, pady=(10,0), sticky="e")
         ctk.CTkButton(button_frame, text="Apply", command=self._on_ok).pack(side="right", padx=10)
         ctk.CTkButton(button_frame, text="Cancel", command=self.destroy).pack(side="right")
 
     def _get_visible_param_keys(self) -> List[str]:
-        """
-        Filters the full parameter list based on the current search and category.
-
-        Returns:
-            List[str]: A list of unique keys for the parameters that should be
-                       visible in the treeview.
-        """
         search_term = self.search_var.get().lower()
         category = self.category_filter.get()
 
@@ -217,63 +188,48 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             permname_lower = param.get('permname', '').lower()
             param_category = param.get('category', 'General')
 
-            # Apply search filter (checks both label and permname)
-            search_miss = search_term and search_term not in label_lower and search_term not in permname_lower
-            # Apply category filter
-            category_miss = category != "All" and param_category != category
-            
-            if search_miss or category_miss:
+            if (search_term and search_term not in label_lower and search_term not in permname_lower) or \
+               (category != "All" and param_category != category):
                 continue
 
             visible_keys.append(self._get_param_key(param))
         return visible_keys
 
     def _select_all_visible(self):
-        """Adds all currently visible parameters to the selection."""
-        visible_iids = self.tree.get_children('')
-        if not visible_iids:
+        visible_items = self.tree.get_children('')
+        if not visible_items:
             return
 
-        for iid in visible_iids:
+        for iid in visible_items:
             if iid not in self.selection_state:
                 self.selection_state.add(iid)
                 self.tree.item(iid, image=self.checked_img)
 
     def _deselect_all_visible(self):
-        """Removes all currently visible parameters from the selection."""
-        visible_iids = self.tree.get_children('')
-        if not visible_iids:
+        visible_items = self.tree.get_children('')
+        if not visible_items:
             return
 
-        for iid in visible_iids:
+        for iid in visible_items:
             if iid in self.selection_state:
                 self.selection_state.remove(iid)
                 self.tree.item(iid, image=self.unchecked_img)
 
     def _get_param_key(self, param: Dict) -> str:
-        """
-        Creates a unique key for a parameter definition dictionary.
-        This helps differentiate parameters with the same permname but different
-        polarities or sources.
-        """
         return f"{param['permname']}|{param.get('polarity')}|{param.get('source')}"
 
     def _update_list(self, _=None):
-        """
-        Clears and repopulates the treeview based on current filter settings.
-        
-        This is the main refresh function for the parameter list. It gets the
-        list of visible parameters, then iterates through them to insert rows
-        into the treeview with the correct data and checkbox state.
-        """
         self.tree.delete(*self.tree.get_children())
 
         if not self.checked_img or not self.unchecked_img:
-            # Don't try to render if images failed to load
             return
 
         visible_keys = self._get_visible_param_keys()
         param_map = {self._get_param_key(p): p for p in self.all_parameters}
+        selected_source = self.source_var.get()
+
+        if not selected_source or not self.all_sources:
+            return
 
         for i, key in enumerate(visible_keys):
             param = param_map.get(key)
@@ -282,30 +238,29 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             tag = 'evenrow' if i % 2 == 0 else 'oddrow'
             image = self.checked_img if key in self.selection_state else self.unchecked_img
 
-            # Get the parameter's value from the reference dataset
-            raw_value = self.dataset.get_parameter_value(param['permname'])
+            raw_value = self.loader_service.get_parameter_value_for_source(
+                self.dataset, param['permname'], selected_source
+            )
+            
             formatted_value = format_parameter_value(raw_value, param)
+            
+            category_name = param.get('category', 'General')
+            if category_name == 'Source':
+                category_name = f"Source - {selected_source}"
 
             self.tree.insert("", "end", iid=key,
-                text=f" {param.get('label', '')}", # Add padding for checkbox
+                text=f" {param.get('label', '')}",
                 image=image,
                 values=(
-                    param.get('category', 'General'),
+                    category_name,
                     formatted_value
                 ),
                 tags=(tag,))
 
     def _on_click(self, event):
-        """
-        Handles click events on the treeview to toggle a parameter's selection.
-        
-        Args:
-            event: The tkinter mouse event.
-        """
         iid = self.tree.identify_row(event.y)
         if not iid: return
 
-        # Only toggle if the click is on the checkbox/text area (region='tree')
         if self.tree.identify_region(event.x, event.y) == 'tree':
             if iid in self.selection_state:
                 self.selection_state.remove(iid)
@@ -315,29 +270,28 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
                 self.tree.item(iid, image=self.checked_img)
 
     def _on_ok(self):
-        """
-        Finalizes the selection and closes the dialog.
-        
-        This method constructs the final list of selected parameter dictionaries
-        based on the keys in `selection_state` and then destroys the window.
-        """
-        self.final_selection = [
+        initial_selection = [
             p for p in self.all_parameters
             if self._get_param_key(p) in self.selection_state
         ]
+        
+        selected_source = self.source_var.get()
+        if selected_source and self.all_sources:
+            modified_selection = []
+            for param in initial_selection:
+                if param.get('category') == 'Source':
+                    new_param = copy.copy(param)
+                    new_param['category'] = f"Source - {selected_source}"
+                    modified_selection.append(new_param)
+                else:
+                    modified_selection.append(param)
+            self.final_selection = modified_selection
+        else:
+            self.final_selection = initial_selection
+
         self.grab_release()
         self.destroy()
 
     def get_selection(self) -> Optional[List[Dict]]:
-        """
-        Public method to show the dialog and retrieve the result.
-
-        This method blocks until the window is closed (either by 'Apply', 'Cancel',
-        or the window manager).
-
-        Returns:
-            Optional[List[Dict]]: A list of the selected parameter dictionaries if
-                                  the user clicked 'Apply', otherwise None.
-        """
         self.wait_window()
         return self.final_selection

@@ -1,6 +1,12 @@
+# Core UI and Application Framework
 customtkinter
-pandas
-fpdf
-matplotlib
+tkinterdnd2-universal
 Pillow
-tkinterdnd2
+
+# Data Handling and Analysis
+pandas
+numpy
+
+# Plotting and Reporting
+matplotlib
+fpdf2

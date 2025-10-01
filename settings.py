@@ -1,13 +1,13 @@
-"""
-Centralizes global constants and feature flags for the application.
-
-This module is intended to hold simple, static configuration values that can
-be accessed from anywhere in the application to control its behavior,
-particularly for debugging and development purposes.
-"""
+# settings.py
 
 # --- Centralized Debug Flag ---
-# This is the primary flag used throughout the application to enable detailed
-# logging and other debug-related functionalities. It is currently the only
-# setting used by logger_setup.py to determine the log level.
-ENABLE_DEBUG_LOGGING = True
+# Set to True to print detailed parsing and discovery steps to the console.
+# Set to False for production release.
+ENABLE_DEBUG_LOGGING = False
+
+# --- Developer Logging Configuration ---
+# Controls the behavior of the application's logging system.
+LOGGING_ENABLED = False
+LOGGING_LEVEL = 'DEBUG'
+LOGGING_OUTPUT = ['console', 'file']
+LOG_FILE_NAME = 'timsCompare.log'
