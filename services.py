@@ -622,7 +622,7 @@ class DataLoaderService:
                         return os.path.join(root, file) 
         return None 
     
-    def parse_additional_parameters(self, dataset: Dataset, additional_params_info: List[Dict]): 
+    def parse_additional_parameters(self, dataset: Dataset, additional_params_info: List[Dict], ion_source: Optional[str] = None): 
         if not hasattr(dataset, 'xml_root') or not additional_params_info: 
             return 
         instrument_scope_element = dataset.xml_root.find('instrument') 
@@ -647,7 +647,8 @@ class DataLoaderService:
                 method_scope_element=segment.xml_scope_element, 
                 instrument_scope_element=instrument_scope_element, 
                 param_info=all_params_to_check, 
-                ion_polarity=polarity_string 
+                ion_polarity=polarity_string,
+                ion_source=ion_source 
             ) 
             segment.parameters.update(last_segment_params) 
             segment.parameters.update(new_values) 

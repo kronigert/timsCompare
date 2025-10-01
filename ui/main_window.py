@@ -217,6 +217,8 @@ class timsCompareApp:
         self.report_generator = report_generator 
         self.logger = logging.getLogger(__name__) 
 
+        self.last_selected_source: Optional[str] = None
+
         if not hasattr(self.root, "block_update_dimensions_event"): 
             self.root.block_update_dimensions_event = lambda: None 
         if not hasattr(self.root, "unblock_update_dimensions_event"): 
@@ -658,28 +660,28 @@ class timsCompareApp:
                 dataset=selected_dataset, 
                 all_params=all_param_definitions, 
                 all_sources=all_sources,
-                previously_selected_params=self.displayed_params
+                previously_selected_params=self.displayed_params,
+                last_used_source=self.last_selected_source
             )
-            new_selection = dialog.get_selection() 
+            dialog_result = dialog.get_selection()
 
-            if new_selection is not None: 
-                self.logger.debug(f"Dialog returned {len(new_selection)} selected parameters.") 
+            if dialog_result is not None:
+                new_selection, selected_source = dialog_result
 
-                current_keys = {self._get_param_key(p) for p in self.displayed_params} 
-                new_keys = {self._get_param_key(p) for p in new_selection} 
+                if selected_source:
+                    self.last_selected_source = selected_source
+                    
+                if selected_source:
+                    self.logger.info(f"Applying view for source '{selected_source}'. Re-parsing all displayed parameters.")
+                    for ds in self.datasets:
+                        self.loader.parse_additional_parameters(ds, new_selection, ion_source=selected_source)
+                
+                self.displayed_params = new_selection
+                
+                self._redraw_ui()
 
-                keys_to_parse = new_keys - current_keys 
-                if keys_to_parse: 
-                    self.logger.info(f"Need to parse data for {len(keys_to_parse)} newly added parameters.") 
-                    original_configs = [p for p in all_found_params_dict.values() if self._get_param_key(p) in keys_to_parse] 
-                    for ds in self.datasets: 
-                        self.loader.parse_additional_parameters(ds, original_configs) 
-
-                self.displayed_params = new_selection 
-                self._redraw_ui() 
-
-                self.root.geometry(current_geometry) 
-        except Exception as e: 
+                self.root.geometry(current_geometry)
+        except Exception as e:
             self.logger.error("An error occurred while opening or processing the parameter selection dialog.", exc_info=True) 
             messagebox.showerror("Error", f"An unexpected error occurred:\n{e}") 
 

@@ -16,7 +16,7 @@ from utils import format_parameter_value, resource_path, apply_dark_title_bar
 
 class ParameterSelectionWindow(ctk.CTkToplevel):
     def __init__(self, master, loader_service: DataLoaderService, dataset: Dataset, 
-                 all_params: List, all_sources: List, previously_selected_params: List):
+                 all_params: List, all_sources: List, previously_selected_params: List, last_used_source: Optional[str] = None):
         super().__init__(master)
         
         self.bind("<Map>", self._on_map)
@@ -32,6 +32,8 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
         self.all_sources = all_sources
         self.final_selection: Optional[List[Dict]] = None
         self.all_categories = sorted(list(set(p.get('category', 'General') for p in self.all_parameters)))
+
+        self.last_used_source = last_used_source
 
         self.selection_state: Set[str] = {self._get_param_key(p) for p in previously_selected_params}
         self.source_var = ctk.StringVar()
@@ -128,6 +130,7 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
         self.category_filter.grid(row=0, column=3, padx=(0,10), pady=5, sticky="ew")
         
         ctk.CTkLabel(filter_frame, text="Source:", text_color="#E4EFF7").grid(row=0, column=4, padx=(10,5), pady=5)
+
         self.source_filter = ctk.CTkOptionMenu(
             filter_frame,
             values=self.all_sources if self.all_sources else ["-"],
@@ -135,8 +138,12 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
             command=self._update_list
         )
 
-        if "captivespray" in self.all_sources:
+        if self.last_used_source and self.last_used_source in self.all_sources:
+            self.source_var.set(self.last_used_source)
+
+        elif "captivespray" in self.all_sources:
             self.source_var.set("captivespray")
+
         elif self.all_sources:
             self.source_var.set(self.all_sources[0])
 
@@ -276,6 +283,7 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
         ]
         
         selected_source = self.source_var.get()
+        
         if selected_source and self.all_sources:
             modified_selection = []
             for param in initial_selection:
@@ -285,9 +293,11 @@ class ParameterSelectionWindow(ctk.CTkToplevel):
                     modified_selection.append(new_param)
                 else:
                     modified_selection.append(param)
-            self.final_selection = modified_selection
+            
+            self.final_selection = (modified_selection, selected_source)
+        
         else:
-            self.final_selection = initial_selection
+            self.final_selection = (initial_selection, None)
 
         self.grab_release()
         self.destroy()
