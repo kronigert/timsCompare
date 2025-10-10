@@ -379,10 +379,17 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
             if g == "Calculated Parameters": return (2, g)
             return (1, g)
         sorted_groups = sorted(grouped_params.keys(), key=sort_key)
+
+        default_params_for_sorting = self.loader_service.get_default_parameters_for_dataset(self.dataset)
+        order_map = {p['permname']: i for i, p in enumerate(default_params_for_sorting)}
+ 
         
         for group_name in sorted_groups:
             group_iid = self.tree.insert("", "end", text=group_name, open=True, tags=('category_header',))
-            params_in_group = grouped_params[group_name]
+            params_in_group = sorted(
+                grouped_params[group_name],
+                key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', ''))
+            )
             for p_config in params_in_group:
                 param_key = self._get_param_key(p_config)
                 param_label = p_config.get('label', p_config['permname'])
@@ -432,19 +439,40 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
     def _get_param_key(self, param: Dict) -> str:
         return f"{param['permname']}|{param.get('polarity')}|{param.get('source')}"
     def _add_parameters(self):
-        additional_param_keys = {self._get_param_key(p) for p in self.all_additional_params}
-        default_params = [p for p in self.current_params if self._get_param_key(p) not in additional_param_keys]
-        dialog = ParameterSelectionWindow(self, dataset=self.dataset, all_params=self.all_additional_params, previously_selected_params=self.current_params)
-        selected_additional_params = dialog.get_selection()
-        if selected_additional_params is not None:
-            current_additional_keys = {self._get_param_key(p) for p in self.current_params if self._get_param_key(p) in additional_param_keys}
-            new_additional_keys = {self._get_param_key(p) for p in selected_additional_params}
-            newly_added_keys = new_additional_keys - current_additional_keys
-            if newly_added_keys:
-                newly_added_configs = [p for p in self.all_additional_params if self._get_param_key(p) in newly_added_keys]
-                self.loader_service.parse_additional_parameters(self.dataset, newly_added_configs)
-            self.current_params = default_params + selected_additional_params
-            self.param_enabled_vars.update({self._get_param_key(p): tk.BooleanVar(value=True) for p in selected_additional_params})
+        all_possible_params = self.current_params + self.all_additional_params
+        
+        seen_keys = set()
+        unique_params = []
+        for p in all_possible_params:
+            key = self._get_param_key(p)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_params.append(p)
+
+        dialog = ParameterSelectionWindow(
+            self,
+            loader_service=self.loader_service,
+            dataset=self.dataset,
+            all_params=unique_params,
+            all_sources=self.dataset.available_sources,
+            previously_selected_params=self.current_params,
+            last_used_source=None 
+        )
+        
+        dialog_result = dialog.get_selection()
+        
+        if dialog_result is not None:
+            new_selection, selected_source = dialog_result
+
+            if selected_source:
+                self.loader_service.parse_additional_parameters(self.dataset, new_selection, ion_source=selected_source)
+
+            self.current_params = new_selection
+            
+            self.param_enabled_vars = {
+                self._get_param_key(p): tk.BooleanVar(value=True) for p in self.current_params
+            }
+            
             self._update_parameter_list()
     
     def _on_drag_press(self, event: tk.Event):

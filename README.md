@@ -4,7 +4,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Latest Release](https://img.shields.io/github/v/release/kronigert/timsCompare?label=latest%20release)](https://github.com/kronigert/timsCompare/releases)
 
-A Python desktop application for mass spectrometry users to load, view, compare, and export professional method reports from Bruker's .d method directories.
+A Python desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
 
 <img width="1920" height="1032" alt="timsCompare" src="https://github.com/user-attachments/assets/18922ecd-cd2a-48dc-aff0-08947203ba78" />
 
