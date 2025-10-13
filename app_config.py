@@ -13,6 +13,7 @@ PARAMETER_DEPENDENCY_MAP = {
     "IMS_imeX_RampStart": "IMS_imeX_Mode",
     "IMS_imeX_RampEnd": "IMS_imeX_Mode",
     "IMS_imeX_RampTime": "IMS_imeX_Mode",
+    "IMS_imeX_AccumulationTime": "IMS_imeX_Mode"
 }
 
 class AppConfig:
@@ -87,7 +88,8 @@ class AppConfig:
             "IMS_ATS_Active": "TIMS Stepping",
             "Internal_SWCompatibilityUseIMS": "TIMS",
             "Ims_Stepping_Active": "MS/MS Stepping",
-            "TOF_DetectorTof_HighSensitivity_Enabled": "High Sensitivity Detection"
+            "TOF_DetectorTof_HighSensitivity_Enabled": "High Sensitivity Detection",
+            "Collision_Energy_Offset_Set": "Collision Energy Offset"
         }
 
         for key, content_string in CONFIG_DATA.items():
@@ -101,7 +103,10 @@ class AppConfig:
                 group_element = xml_root.find(".//GROUP/DISPLAYNAME")
                 group_name = group_element.text.strip() if group_element is not None and group_element.text else "General"
                 
-                param_elements = xml_root.findall(".//*[PERMANENTNAME]")
+                param_elements = xml_root.findall(".//VARIABLES/*")
+                if not param_elements:
+                    param_elements = xml_root.findall(".//*[PERMANENTNAME]")
+
                 self.logger.debug("Found %d potential parameter definitions in %s.", len(param_elements), key)
 
                 for param_element in param_elements:

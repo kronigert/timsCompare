@@ -54,6 +54,7 @@ class DataLoaderService:
         has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for ds in datasets for s in ds.segments) 
         has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for ds in datasets for s in ds.segments) 
         has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for ds in datasets for s in ds.segments) 
+        has_msms_stepping = any(s.parameters.get("Ims_Stepping_Active") == '1' for ds in datasets for s in ds.segments)
 
         all_workflows_in_dataset = {s.workflow_name for ds in datasets for s in ds.segments if s.workflow_name} 
         default_params_by_workflow = self.config.parameter_definitions 
@@ -82,21 +83,46 @@ class DataLoaderService:
             if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue 
             if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue 
             if pname == 'IMSICC_Target' and not has_icc_mode1: continue 
+            if pname == 'calc_msms_stepping_display_list' and not has_msms_stepping: continue
             
             mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"] 
             if pname in mode2_params and not has_icc_mode2: continue 
 
-            param_config = all_definitions_map.get(pname) 
-            if not param_config and pname.startswith("calc_"): 
-                label_map = {"calc_scan_area_mz": "Window Scan Area", "calc_ramps": "Ramps per Cycle", "calc_ms1_scans": "MS1 Scans per Cycle", "calc_steps": "Isolation Steps per Cycle", "calc_mz_width": "Isolation Window Width", "calc_ce_ramping_start": "CE Ramping Start", "calc_ce_ramping_end": "CE Ramping End"} 
-                label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title()) 
-                category = "Mode" if "Scan Mode" in label else "Calculated Parameters" 
-                param_config = {"permname": pname, "label": label, "category": category} 
+            param_config = all_definitions_map.get(pname)
             
-            if param_config: 
-                default_param_configs.append(param_config) 
+            if not param_config:
+                if pname.startswith("calc_"):
+                    label_map = {
+                        "calc_scan_area_mz": "Window Scan Area",
+                        "calc_ramps": "Ramps per Cycle",
+                        "calc_ms1_scans": "MS1 Scans per Cycle",
+                        "calc_steps": "Isolation Steps per Cycle",
+                        "calc_mz_width": "Isolation Window Width",
+                        "calc_ce_ramping_start": "CE Ramping Start",
+                        "calc_ce_ramping_end": "CE Ramping End",
+                        "calc_msms_stepping_display_list": "MS/MS Stepping Details"
+                    }
+                    label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title())
+                    if "Stepping" in label:
+                        category = "TIMS"
+                    elif "Scan Mode" in label:
+                        category = "Mode"
+                    else:
+                        category = "Calculated Parameters"
+                    param_config = {"permname": pname, "label": label, "category": category}
+                else:
+                    param_config = {
+                        "permname": pname,
+                        "label": pname.replace("_", " "),
+                        "category": "General" 
+                    }
+
+            if param_config:
+                default_param_configs.append(param_config)
         
-        return default_param_configs 
+        final_params = [p for p in default_param_configs if p.get('permname') != 'Calibration_MarkSegment']
+        
+        return final_params
 
     def _discover_available_parameters(self, xml_root: ET.Element) -> Tuple[List[Dict], List[Dict]]: 
         all_definitions = self.config.all_definitions 
@@ -201,13 +227,16 @@ class DataLoaderService:
                 
                 new_segment.xml_scope_element = seg_element 
                 
-                self._parse_and_populate_segment(new_segment, seg_element, instrument_element, scan_mode_map, polarity_map, folder_path, last_segment_params) 
+                unfiltered_params_for_next_segment = self._parse_and_populate_segment(
+                    new_segment, seg_element, instrument_element, 
+                    scan_mode_map, polarity_map, folder_path, last_segment_params
+                )
                 dataset.segments.append(new_segment) 
                 
                 if end_time >= 0: 
                     last_end_time = end_time 
                 
-                last_segment_params = new_segment.parameters.copy() 
+                last_segment_params = unfiltered_params_for_next_segment
         
         self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully with {len(dataset.segments)} segment(s).") 
 
@@ -231,12 +260,12 @@ class DataLoaderService:
 
     def _parse_and_populate_segment(self, new_segment: Segment, param_scope_element: ET.Element, 
                                      instrument_scope_element: Optional[ET.Element], 
-                                     scan_mode_map: Dict, polarity_map: Dict, folder_path: str, previous_params: Dict): 
-        final_params = previous_params.copy() 
+                                     scan_mode_map: Dict, polarity_map: Dict, folder_path: str, previous_params: Dict) -> Dict:
+        unfiltered_params = previous_params.copy() 
         
         current_polarity_el = param_scope_element.find(f".//*[@permname='Mode_IonPolarity']") 
         current_polarity_val = self._get_value_from_element(current_polarity_el, {}) 
-        final_polarity_raw_val = current_polarity_val if current_polarity_val is not None else final_params.get("Mode_IonPolarity") 
+        final_polarity_raw_val = current_polarity_val if current_polarity_val is not None else unfiltered_params.get("Mode_IonPolarity") 
         polarity_string = polarity_map.get(str(final_polarity_raw_val)) 
 
         parsed_values = self._parse_parameters_for_scope( 
@@ -246,24 +275,60 @@ class DataLoaderService:
             polarity_string,
             ion_source=None 
         ) 
-        final_params.update(parsed_values) 
+        unfiltered_params.update(parsed_values)
         
-        new_segment.parameters = final_params 
+        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
         
-        scan_mode_val = new_segment.parameters.get("Mode_ScanMode") 
+        for permname, value in list(unfiltered_params.items()):
+            if isinstance(value, list):
+                param_config = all_defs_map.get(permname)
+                if param_config:
+                    driver_permname = param_config.get("lookup_driven_by")
+                    if driver_permname:
+                        driver_value = unfiltered_params.get(driver_permname)
+                        if driver_value is not None:
+                            try:
+                                index = ime_x_mode_to_index.get(str(driver_value))
+                                if index is not None and index < len(value):
+                                    unfiltered_params[permname] = value[index]
+                            except (ValueError, IndexError):
+                                self.logger.warning(f"Could not resolve dependent parameter {permname} using driver {driver_permname} with value {driver_value}.")
+        
+        scan_mode_val = unfiltered_params.get("Mode_ScanMode") 
+        workflow_name = scan_mode_map.get(str(scan_mode_val))
+        
+        if workflow_name is None: 
+            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {new_segment.start_time:.2f} min.") 
+
+        new_segment.workflow_name = workflow_name
+        
         try: 
             new_segment.scan_mode_id = int(scan_mode_val) 
         except (ValueError, TypeError): 
             new_segment.scan_mode_id = None 
 
-        workflow_name = scan_mode_map.get(str(scan_mode_val)) 
-        if workflow_name is None: 
-            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {new_segment.start_time:.2f} min.") 
-            
-        new_segment.workflow_name = workflow_name 
+        new_segment.parameters = unfiltered_params
         
         self._perform_calculations(new_segment, folder_path, polarity_map) 
         self._apply_conditional_logic(new_segment) 
+        
+        allowed_permnames = set(self.config.parameter_definitions.get('__GENERAL__', []))
+        workflow_specific_params = self.config.parameter_definitions.get(workflow_name, [])
+        allowed_permnames.update(workflow_specific_params)
+
+        filtered_params = {}
+        for permname, value in new_segment.parameters.items():
+            if permname in allowed_permnames or permname.startswith("calc_"):
+                filtered_params[permname] = value
+        
+        new_segment.parameters = filtered_params
+        
+        calibration_value = unfiltered_params.get("Calibration_MarkSegment")
+        if calibration_value == "1":
+            new_segment.is_calibration_segment = True
+
+        return unfiltered_params
 
     def _perform_calculations(self, segment: Segment, folder_path: str, polarity_map: Dict): 
         for key in list(segment.parameters.keys()): 
@@ -276,7 +341,8 @@ class DataLoaderService:
         segment.parameters["calc_segment_start_time"] = f"{segment.start_time:.2f} min" 
         segment.parameters["calc_segment_end_time"] = segment.end_time_display 
 
-        self._calculate_energy_ramping_params(segment) 
+        self._calculate_energy_ramping_params(segment)
+        self._calculate_msms_stepping_params(segment)
         
         if segment.scan_mode_id == 6: # PASEF
             self._process_pasef_data(segment) 
@@ -291,6 +357,15 @@ class DataLoaderService:
             ramp_time_value = segment.parameters.get("IMS_imeX_RampTime") 
             if ramp_time_value is not None: 
                 segment.parameters["IMS_imeX_AccumulationTime"] = ramp_time_value 
+
+        icc_mode = segment.parameters.get("IMSICC_Mode")
+        if icc_mode and icc_mode != '0':
+            if "IMS_imeX_AccumulationTime" in segment.parameters:
+                segment.parameters["IMS_imeX_AccumulationTime"] = "variable"
+            if "IMS_imeX_DutyCycleLock" in segment.parameters:
+                segment.parameters["IMS_imeX_DutyCycleLock"] = "variable"
+            if "calc_cycle_time" in segment.parameters:
+                segment.parameters["calc_cycle_time"] = "variable"
 
     def _get_value_from_element(self, element: Optional[ET.Element], config: Dict) -> Optional[Any]: 
         if element is None: 
@@ -462,6 +537,53 @@ class DataLoaderService:
                 segment.parameters["calc_advanced_ce_ramping_display_list"] = ["No advanced values found"] 
             segment.parameters["calc_ce_ramping_start"] = "N/A" 
             segment.parameters["calc_ce_ramping_end"] = "N/A" 
+
+    def _calculate_msms_stepping_params(self, segment: Segment):
+        if segment.parameters.get("Ims_Stepping_Active") != '1':
+            segment.parameters['calc_msms_stepping_display_list'] = None
+            return
+
+        stepping_details = []
+        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+
+        ce_step1 = segment.parameters.get("Energy_Ramping_Collision_Energy_StartEnd")
+        ce_step2 = segment.parameters.get("Energy_Ramping_Collision_Energy_StartEnd_Tims_Step_2")
+        
+        if ce_step1 and isinstance(ce_step1, list) and len(ce_step1) == 2:
+            try:
+                stepping_details.append(f"CE (Scan #1): {float(ce_step1[0]):.1f} - {float(ce_step1[1]):.1f} eV")
+            except (ValueError, TypeError): pass
+        if ce_step2 and isinstance(ce_step2, list) and len(ce_step2) == 2:
+            try:
+                stepping_details.append(f"CE (Scan #2): {float(ce_step2[0]):.1f} - {float(ce_step2[1]):.1f} eV")
+            except (ValueError, TypeError): pass
+
+        vector_params_map = [
+            {"label": "Collision RF", "permname": "Ims_CollisionCellRF_Steps"},
+            {"label": "Transfer Time", "permname": "Ims_TransferTimeSteps"},
+            {"label": "Pre-Pulse Storage", "permname": "Ims_PrePulseStorageTimeSteps"}
+        ]
+
+        for param_map in vector_params_map:
+            values = segment.parameters.get(param_map["permname"])
+            if values is None and "alias" in param_map:
+                values = segment.parameters.get(param_map["alias"])
+
+            if isinstance(values, list):
+                unit = all_defs_map.get(param_map["permname"], {}).get("unit", "")
+                unit_str = f" {unit}" if unit else ""
+                
+                for i, value in enumerate(values):
+                    try:
+                        formatted_value = f"{float(value):.1f}"
+                        stepping_details.append(f"{param_map['label']} (Scan #{i+1}): {formatted_value}{unit_str}")
+                    except (ValueError, TypeError):
+                        continue
+        
+        if stepping_details:
+            segment.parameters['calc_msms_stepping_display_list'] = stepping_details
+        else:
+            segment.parameters['calc_msms_stepping_display_list'] = None
 
     def _process_pasef_data(self, segment: Segment): 
         mass_values_str = segment.parameters.get("IMS_PolygonFilter_Mass") 

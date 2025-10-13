@@ -42,7 +42,7 @@ def format_parameter_value(value: Any, param_config: Dict) -> str:
         formatted_string = str(value)
 
     unit = param_config.get("unit")
-    if unit and formatted_string != "N/A":
+    if unit and formatted_string not in ["N/A", "variable"]:
         return f"{formatted_string} {unit}"
     else:
         return formatted_string

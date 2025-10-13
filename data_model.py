@@ -9,6 +9,7 @@ class Segment:
         self.start_time: float = start_time
         self.end_time: float = end_time
         self.end_time_display: str = f"{end_time:.2f} min"
+        self.is_calibration_segment: bool = False
         
         self.workflow_name: Optional[str] = None
         self.scan_mode_id: Optional[int] = None 

@@ -497,7 +497,12 @@ class timsCompareApp:
                     label.bind("<Leave>", lambda e: self._set_status_bar_text("")) 
 
                     var = ctk.StringVar() 
-                    menu_choices = [f"Segment {i+1} ({seg.start_time:.2f} - {seg.end_time_display})" for i, seg in enumerate(dataset.segments)] 
+                    menu_choices = []
+                    for i, seg in enumerate(dataset.segments):
+                        label = f"Segment {i+1} ({seg.start_time:.2f} - {seg.end_time_display})"
+                        if seg.is_calibration_segment:
+                            label += " (Calibration)"
+                        menu_choices.append(label)
 
                     menu = ctk.CTkOptionMenu( 
                         control_container, 
@@ -779,6 +784,16 @@ class timsCompareApp:
         grouped_params = defaultdict(list) 
         for p_config in all_display_configs: 
             grouped_params[p_config.get("category", "General")].append(p_config) 
+        
+        if "Mode" not in grouped_params:
+            grouped_params["Mode"] = []
+
+        calib_param_config = {
+            "permname": "calc_is_calibration",
+            "label": "Calibration Segment",
+            "category": "Mode"
+        }
+        grouped_params["Mode"].insert(0, calib_param_config)
 
         def sort_key(g): 
             if g == "Mode": return (0, g) 
@@ -798,20 +813,41 @@ class timsCompareApp:
                 key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', '')) 
             ) 
 
-            for param_config in params_in_group: 
-                permname = param_config['permname'] 
-                if permname in displayed_param_keys: continue 
+            for param_config in params_in_group:
+                permname = param_config['permname']
+
+                is_present_in_any_active_segment = any(
+                    permname in ds.segments[ds.active_segment_index].parameters 
+                    for ds in self.datasets
+                )
+
+                if not is_present_in_any_active_segment and permname != "calc_is_calibration":
+                    continue
+
+                if permname == "calc_is_calibration":
+                    calib_values = []
+                    for ds in self.datasets:
+                        try:
+                            active_segment = ds.segments[ds.active_segment_index]
+                            calib_values.append("Yes" if active_segment.is_calibration_segment else "No")
+                        except IndexError:
+                            calib_values.append("N/A")
+                    self._insert_row(param_config, parent_node, calib_values)
+                    displayed_param_keys.add(permname)
+                    continue
+
+                if permname in displayed_param_keys: continue
                 
-                raw_values = [ds.get_parameter_value(permname) for ds in self.datasets] 
-                is_list_param = any(isinstance(val, list) for val in raw_values) 
+                raw_values = [ds.get_parameter_value(permname) for ds in self.datasets]
+                is_list_param = any(isinstance(val, list) for val in raw_values)
 
-                if is_list_param: 
-                    self._insert_expandable_list_rows(param_config, parent_node, raw_values) 
-                else: 
-                    formatted_values = [format_parameter_value(val, param_config) for val in raw_values] 
-                    self._insert_row(param_config, parent_node, formatted_values) 
+                if is_list_param:
+                    self._insert_expandable_list_rows(param_config, parent_node, raw_values)
+                else:
+                    formatted_values = [format_parameter_value(val, param_config) for val in raw_values]
+                    self._insert_row(param_config, parent_node, formatted_values)
 
-                displayed_param_keys.add(permname) 
+                displayed_param_keys.add(permname)
 
         for parent_iid in self.tree.get_children(''): 
             children = self.tree.get_children(parent_iid) 
