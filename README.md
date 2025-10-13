@@ -43,7 +43,9 @@ The recommended way to use timsCompare is to download the pre-compiled installer
 ### Loading Data
 
 * **Drag and Drop:** Simply drag one or more `.d` or `.m` folders from your file explorer directly onto the application window.
-* **Add Data Button:** Use the "Add Data" button to open a dialog and select the folders you wish to analyze.
+* **Add Data Button:** Use the "Add Data" button to open a dialog and select the folders you wish to visualize.
+
+The parameter values of the loaded datasets are being compared and differences are highlighted in bold text.
 
 ### Adding Parameters
 
