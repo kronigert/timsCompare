@@ -89,7 +89,8 @@ class AppConfig:
             "Internal_SWCompatibilityUseIMS": "TIMS",
             "Ims_Stepping_Active": "MS/MS Stepping",
             "TOF_DetectorTof_HighSensitivity_Enabled": "High Sensitivity Detection",
-            "Collision_Energy_Offset_Set": "Collision Energy Offset"
+            "Collision_Energy_Offset_Set": "Collision Energy Offset",
+            "Energy_Ramping_Advanced_Settings_Active": "Advanced Energy Ramping"
         }
 
         for key, content_string in CONFIG_DATA.items():

@@ -5,7 +5,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from settings import ENABLE_DEBUG_LOGGING
 
-def setup_logging():
+def setup_logging() -> str | None:
     log_level = logging.DEBUG if ENABLE_DEBUG_LOGGING else logging.INFO
     
     log_formatter = logging.Formatter(
@@ -31,10 +31,19 @@ def setup_logging():
         file_handler.setFormatter(log_formatter)
         logger.addHandler(file_handler)
     except (IOError, PermissionError) as e:
-        print(f"Warning: Could not create log file at '{log_file}'. Logging to file is disabled. Error: {e}")
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(log_formatter)
+        logger.addHandler(console_handler)
+        
+        error_message = (f"Could not create log file at:\n{log_file}\n\n"
+                         f"Reason: {e}\n\n"
+                         "Logging to file will be disabled for this session.")
+        logging.warning(error_message)
+        return error_message
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(log_formatter)
     logger.addHandler(console_handler)
     
     logging.info("Logging configured successfully. Application log level: %s", logging.getLevelName(log_level))
+    return None

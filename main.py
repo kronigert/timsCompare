@@ -14,6 +14,7 @@ from app_config import AppConfig
 from services import DataLoaderService, PlottingService, ReportGeneratorService
 from ui.main_window import timsCompareApp
 from logger_setup import setup_logging
+from settings import LOGGING_ENABLED
 
 
 if sys.platform == 'win32':
@@ -26,10 +27,20 @@ class DndCTk(ctk.CTk, TkinterDnD.DnDWrapper):
 
 
 if __name__ == "__main__":
-    setup_logging()
+    if LOGGING_ENABLED:
+        from tkinter import messagebox
+
+        log_setup_error = setup_logging()
+        if log_setup_error:
+            temp_root = tk.Tk()
+            temp_root.withdraw()
+            messagebox.showwarning("Logging Issue", log_setup_error, parent=temp_root)
+            temp_root.destroy()
+
+
     logger = logging.getLogger(__name__)
-    logger.info("Application starting...")
-    
+    logger.info("timsCompare starting...")
+
     config = AppConfig()
 
     ctk.set_appearance_mode("dark")

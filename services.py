@@ -485,8 +485,11 @@ class DataLoaderService:
             self.logger.warning(f"Could not get parameter value for source '{ion_source}': {e}")
             return None
 
+# In services.py -> DataLoaderService
 
-    def _calculate_energy_ramping_params(self, segment: Segment): 
+    def _calculate_energy_ramping_params(self, segment: Segment):
+        self.logger = logging.getLogger(__name__) # Ensure logger is available
+        
         is_advanced_str = segment.parameters.get("Energy_Ramping_Advanced_Settings_Active") 
         is_advanced = (is_advanced_str == '1') 
         segment.parameters["calc_advanced_ce_ramping_display_list"] = None 
@@ -519,24 +522,45 @@ class DataLoaderService:
             advanced_mobility_values_str = segment.parameters.get("Energy_Ramping_Advanced_ListMobilityValues") 
             advanced_ce_values_str = segment.parameters.get("Energy_Ramping_Advanced_ListCollisionEnergyValues") 
             advanced_entry_types_str = segment.parameters.get("Energy_Ramping_Advanced_ListEntryType") 
-            formatted_entries = [] 
-            if advanced_mobility_values_str and advanced_ce_values_str and advanced_entry_types_str: 
+            formatted_entries = []
+            
+            # --- MODIFICATION START: Add logging and robust fallback ---
+            self.logger.debug("Calculating Advanced CE Ramping:")
+            self.logger.debug(f"  - Found Mobility Values: {advanced_mobility_values_str}")
+            self.logger.debug(f"  - Found CE Values: {advanced_ce_values_str}")
+            self.logger.debug(f"  - Found Entry Types: {advanced_entry_types_str}")
+
+            if advanced_mobility_values_str and advanced_ce_values_str:
                 try: 
                     mobility_values = [float(v) for v in advanced_mobility_values_str] 
                     ce_values = [float(v) for v in advanced_ce_values_str] 
-                    entry_types = [int(v) for v in advanced_entry_types_str] 
+                    
+                    # If entry types are not defined, assume default type '0' (base) for all entries.
+                    if advanced_entry_types_str:
+                        entry_types = [int(v) for v in advanced_entry_types_str]
+                    else:
+                        self.logger.debug("  - EntryType list not found. Assuming default type '0' (base).")
+                        entry_types = [0] * len(mobility_values)
+
                     if not (len(mobility_values) == len(ce_values) == len(entry_types)): 
                         raise ValueError("Mismatch in lengths of advanced ramping lists.") 
+
                     for i in range(len(mobility_values)): 
                         entry_type_str = "base" if entry_types[i] == 0 else "fixed" if entry_types[i] == 1 else str(entry_types[i]) 
                         formatted_entries.append(f"{entry_type_str} {ce_values[i]:.2f} eV @ {mobility_values[i]:.2f}") 
+                    
+                    self.logger.debug(f"  - Successfully generated advanced CE list: {formatted_entries}")
                     segment.parameters["calc_advanced_ce_ramping_display_list"] = formatted_entries 
                 except (ValueError, TypeError) as e: 
+                    self.logger.error(f"  - Error parsing advanced ramping values: {e}")
                     segment.parameters["calc_advanced_ce_ramping_display_list"] = [f"Error parsing advanced values: {e}"] 
             else: 
-                segment.parameters["calc_advanced_ce_ramping_display_list"] = ["No advanced values found"] 
+                self.logger.warning("  - Calculation skipped: Missing Mobility or CE value lists.")
+                segment.parameters["calc_advanced_ce_ramping_display_list"] = ["No advanced values found"]
+            # --- MODIFICATION END ---
+            
             segment.parameters["calc_ce_ramping_start"] = "N/A" 
-            segment.parameters["calc_ce_ramping_end"] = "N/A" 
+            segment.parameters["calc_ce_ramping_end"] = "N/A"
 
     def _calculate_msms_stepping_params(self, segment: Segment):
         if segment.parameters.get("Ims_Stepping_Active") != '1':
