@@ -6,7 +6,7 @@
 
 A Python desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
 
-<img width="1920" height="1032" alt="timsCompare" src="https://github.com/user-attachments/assets/18922ecd-cd2a-48dc-aff0-08947203ba78" />
+<img width="1920" height="1032" alt="Method_Comparison" src="https://github.com/user-attachments/assets/f34704e9-850a-4619-9179-c17e8eadc1e9" />
 
 ---
 
