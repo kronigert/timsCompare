@@ -54,6 +54,8 @@ After loading your data, you can add more parameters to the comparison table:
 3.  Select the desired parameters using the checkboxes.
 4.  Click **Apply** to add them to the main view.
 
+<img width="1202" height="732" alt="Parameters" src="https://github.com/user-attachments/assets/5416521b-e424-43f5-831e-84d40c373be3" />
+
 ### Generating Reports
 
 1.  Load a dataset.
@@ -61,6 +63,8 @@ After loading your data, you can add more parameters to the comparison table:
 3.  Click the "Export" button and choose "Method Report...".
 4.  In the report dialog, customize the parameters and segments you wish to include.
 5.  Choose your export format (PDF or CSV) and click "Generate Report".
+
+<img width="666" height="938" alt="Method_Report" src="https://github.com/user-attachments/assets/83fb7067-5700-4294-ac1e-0f6aafdfc288" />
 
 ### Exporting Scan Windows
 
@@ -75,7 +79,7 @@ This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and a
 ---
 ## Disclaimer
 
-This is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
+timsCompare is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
 
 ## License
 
