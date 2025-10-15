@@ -4,7 +4,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Latest Release](https://img.shields.io/github/v/release/kronigert/timsCompare?label=latest%20release)](https://github.com/kronigert/timsCompare/releases)
 
-A Python desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
+A desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
 
 <img width="1920" height="1032" alt="Method_Comparison" src="https://github.com/user-attachments/assets/f34704e9-850a-4619-9179-c17e8eadc1e9" />
 
@@ -14,7 +14,7 @@ A Python desktop application for mass spectrometry users to load, view, compare,
 
 **timsCompare** is a desktop application developed for mass spectrometry users to efficiently analyze instrument method files. Built with Python and customtkinter, it provides an intuitive graphical interface to parse, visualize, and compare metadata from Bruker's `.d` and `.m` method directories.
 
-The application specializes in handling various acquisition modes, including PASEF, dia-PASEF, diagonal-PASEF, and more.
+The application can handle various acquisition modes, including PASEF, dia-PASEF, diagonal-PASEF, and more.
 
 ### Key Features
 
@@ -32,7 +32,7 @@ The recommended way to use timsCompare is to download the pre-compiled installer
 
 ### Installation
 
-1.  **Download:** Go to the [**Releases Page**](https://github.com/kronigert/timsCompare/releases) and download the `timsCompare-vX.X.zip` file from the latest release.
+1.  **Download:** Go to the [**Releases Page**](https://github.com/kronigert/timsCompare/releases) and download the `timsCompare_Setup_vX.X.zip` file from the latest release.
 2.  **Extract:** Unzip the downloaded file and run the installer.
 3.  **Run:** Open timsCompare from the start menu or a shortcut to start the application.
 
@@ -81,7 +81,7 @@ This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and a
 ---
 ## Disclaimer
 
-timsCompare is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker.
+timsCompare is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker. If you encounter bugs or wrong values being displayed, please let me know via the [**Issues** section](https://github.com/kronigert/timsCompare/issues).
 
 ## License
 
