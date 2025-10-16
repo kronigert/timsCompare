@@ -31,7 +31,6 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
         self.title(f"Method Report for {dataset.display_name}")
         self.geometry("950x700")
 
-        # --- Injected Dependencies & State ---
         self.dataset = dataset
         self.is_multisegment = len(dataset.segments) > 1
         self.all_additional_params = all_additional_params
@@ -40,7 +39,6 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
         self.plotting_service = plotting_service
         self.current_params = initial_params
 
-        # --- UI Widgets & State ---
         self.tree: Optional[ttk.Treeview] = None
         self.export_format_var = ctk.StringVar(value="PDF")
         self.show_filename_var = tk.BooleanVar(value=True)
@@ -52,24 +50,20 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
         self.progress_bar: Optional[ctk.CTkProgressBar] = None
         self.progress_label: Optional[ctk.CTkLabel] = None
 
-        # --- Progress Tracking State ---
         self.is_exporting = False
         self.current_progress = 0
         self.total_progress_steps = 0
 
-        # --- State for segment selection ---
         self.segment_selection_vars: Dict[int, tk.BooleanVar] = {
             i: tk.BooleanVar(value=True) for i in range(len(self.dataset.segments))
         }
         self.segment_buttons: Dict[int, ctk.CTkButton] = {}
 
-        # --- Checkbox & Drag State ---
         self.drag_data = {"iid": None, "y": 0}
         self.param_enabled_vars: Dict[str, tk.BooleanVar] = {
             self._get_param_key(p): tk.BooleanVar(value=True) for p in self.current_params
         }
 
-        # --- Load Images ---
         self._load_images()
 
         self._create_widgets()
@@ -93,9 +87,6 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
             except Exception as e:
                 logging.getLogger(__name__).warning(f"Could not set Toplevel window icon: {e}")
 
-        # Schedule the set_icon function to run after 100ms.
-        # This delay allows the main CTk drawing/theming loop to complete first,
-        # ensuring the icon is the last thing to be set.
         self.after(100, set_icon)
 
 

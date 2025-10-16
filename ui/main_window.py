@@ -90,9 +90,11 @@ class Tooltip:
 
 
 class AboutDialog(ctk.CTkToplevel): 
-    def __init__(self, master, about_icon, github_icon): 
+    def __init__(self, master, about_icon, github_icon, config: AppConfig): 
         super().__init__(master) 
         
+        self.config = config
+        self.logger = logging.getLogger(__name__)
         self.bind("<Map>", self._on_map)
         
         self.title("About timsCompare") 
@@ -114,7 +116,7 @@ class AboutDialog(ctk.CTkToplevel):
         
         title_label = ctk.CTkLabel( 
             top_frame, 
-            text="timsCompare v1.0", 
+            text="timsCompare v1.01", 
             font=ctk.CTkFont(size=22, weight="bold"), 
             text_color="#E4EFF7" 
         ) 
@@ -122,7 +124,7 @@ class AboutDialog(ctk.CTkToplevel):
 
         description_text = ( 
             "timsCompare is a desktop application for mass spectrometry users, designed to analyze " 
-            "and compare Bruker's .d / .m methods. It can handle multi-segment methods and supports" 
+            "and compare Bruker's .d / .m methods. It can handle multi-segment methods and supports " 
             "a wide range of acquisition modes including PASEF, dia-PASEF, diagonal-PASEF, and more.\n\n" 
             "Methods can be loaded using the 'Add Data' button or via drag-and-drop.\n\n" 
             "The tool's core functionalities are:\n\n" 
@@ -173,6 +175,14 @@ class AboutDialog(ctk.CTkToplevel):
         )
         github_button.pack(side="left", padx=5)
 
+        self.licenses_button = ctk.CTkButton(
+            button_container,
+            text="View Licenses",
+            command=self._show_licenses_window,
+            width=120
+        )
+        self.licenses_button.pack(side="left", padx=5)
+
         close_button = ctk.CTkButton(
             button_container,
             text="Close",
@@ -201,10 +211,36 @@ class AboutDialog(ctk.CTkToplevel):
             except Exception as e:
                 logging.getLogger(__name__).warning(f"Could not set Toplevel window icon: {e}")
 
-        # Schedule the set_icon function to run after 100ms.
-        # This delay allows the main CTk drawing/theming loop to complete first,
-        # ensuring the icon is the last thing to be set.
         self.after(100, set_icon)
+    
+    def _show_licenses_window(self):
+        licenses_win = ctk.CTkToplevel(self)
+        licenses_win.title("Third-Party Licenses")
+        licenses_win.geometry("700x500")
+        licenses_win.transient(self)
+        licenses_win.grab_set()
+
+        textbox = ctk.CTkTextbox(licenses_win, wrap="word", font=ctk.CTkFont(family="monospace", size=11))
+        textbox.pack(fill="both", expand=True, padx=10, pady=10)
+
+        try:
+            licenses = self.config.third_party_licenses
+            
+            full_text = "timsCompare is built using several open-source libraries.\nWe gratefully acknowledge the contributions of their developers.\n\n"
+            full_text += "=" * 70 + "\n\n"
+
+            for lib_name, info in licenses.items():
+                full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
+                full_text += f"{info.get('text', 'No license text found.')}\n\n"
+                full_text += "=" * 70 + "\n\n"
+            
+            textbox.insert("1.0", full_text)
+
+        except Exception as e:
+            self.logger.error(f"Could not load license information: {e}", exc_info=True)
+            textbox.insert("1.0", f"Could not load license information.\n\nError: {e}")
+        
+        textbox.configure(state="disabled")
 
 
 class timsCompareApp: 
@@ -1158,4 +1194,4 @@ class timsCompareApp:
         self._update_treeview_data() 
 
     def _show_about_dialog(self):
-        AboutDialog(self.root, self.about_icon, self.github_icon)
+        AboutDialog(self.root, self.about_icon, self.github_icon, self.config)

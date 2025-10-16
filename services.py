@@ -485,8 +485,6 @@ class DataLoaderService:
             self.logger.warning(f"Could not get parameter value for source '{ion_source}': {e}")
             return None
 
-# In services.py -> DataLoaderService
-
     def _calculate_energy_ramping_params(self, segment: Segment):
         self.logger = logging.getLogger(__name__) # Ensure logger is available
         
@@ -801,7 +799,7 @@ class DataLoaderService:
             last_segment_params = segment.parameters.copy() 
 
 
-class PlottingService: #
+class PlottingService: 
     def generate_plot_as_buffer(self, dataset: Dataset, width_px: int, height_px: int, bg_color: str = "#E4EFF7", for_report: bool = False, dpi: int = 100, show_filename: bool = True) -> Optional[io.BytesIO]: 
         try: 
             active_segment = dataset.segments[dataset.active_segment_index] 

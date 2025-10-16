@@ -1,3 +1,5 @@
+# app_config.py
+
 import os
 import json
 import re
@@ -25,6 +27,7 @@ class AppConfig:
         self._all_definitions: Optional[List[Dict]] = None
         self._parameter_definitions: Optional[List[str]] = None
         self._display_name_map: Optional[Dict[str, str]] = None
+        self._third_party_licenses: Optional[Dict] = None
         
     @property
     def all_definitions(self) -> List[Dict]:
@@ -43,6 +46,12 @@ class AppConfig:
         if self._display_name_map is None:
             self._display_name_map = self._load_properties_from_config("display_name_map.properties")
         return self._display_name_map
+
+    @property
+    def third_party_licenses(self) -> Dict[str, Dict[str, str]]:
+        if self._third_party_licenses is None:
+            self._third_party_licenses = self._load_json_from_file("third_party_licenses.json")
+        return self._third_party_licenses
 
     def _parse_properties_content(self, content: str) -> Dict[str, str]:
         prop_map = {}
