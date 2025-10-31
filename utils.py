@@ -65,7 +65,7 @@ def apply_dark_title_bar(window):
             hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20 
             
-            value = ctypes.c_int(2) # 2 = Enable dark mode, 0 = Disable
+            value = ctypes.c_int(2) 
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value))
         except Exception as e:
             print(f"Failed to apply dark title bar: {e}")

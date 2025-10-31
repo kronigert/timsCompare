@@ -10,3 +10,7 @@ numpy
 # Plotting and Reporting
 matplotlib
 fpdf2
+
+# Dependencies discovered during build
+fontTools
+defusedxml

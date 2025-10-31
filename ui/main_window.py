@@ -20,6 +20,7 @@ from services import DataLoaderService, PlottingService, ReportGeneratorService,
 from utils import format_parameter_value, resource_path, apply_dark_title_bar 
 from .parameter_selection import ParameterSelectionWindow 
 from PIL import Image, ImageTk 
+from .view_manager import ViewManager
 
 class Tooltip: 
     def __init__(self, widget, text_callback): 
@@ -98,7 +99,7 @@ class AboutDialog(ctk.CTkToplevel):
         self.bind("<Map>", self._on_map)
         
         self.title("About timsCompare") 
-        self.geometry("600x550") 
+        self.geometry("600x600") 
         self.resizable(False, False) 
         self.transient(master) 
         self.grab_set() 
@@ -116,27 +117,28 @@ class AboutDialog(ctk.CTkToplevel):
         
         title_label = ctk.CTkLabel( 
             top_frame, 
-            text="timsCompare v1.01", 
+            text="timsCompare v1.1", 
             font=ctk.CTkFont(size=22, weight="bold"), 
             text_color="#E4EFF7" 
         ) 
         title_label.grid(row=0, column=1, sticky="w") 
 
-        description_text = ( 
-            "timsCompare is a desktop application for mass spectrometry users, designed to analyze " 
-            "and compare Bruker's .d / .m methods. It can handle multi-segment methods and supports " 
-            "a wide range of acquisition modes including PASEF, dia-PASEF, diagonal-PASEF, and more.\n\n" 
-            "Methods can be loaded using the 'Add Data' button or via drag-and-drop.\n\n" 
-            "The tool's core functionalities are:\n\n" 
-            "1. Parameter Comparison: Provides a detailed, side-by-side view of acquisition " 
-            "parameters, automatically highlighting differences between methods.\n\n" 
-            "2. Window Export: Offers a function to export the isolation " 
-            "window definitions for PASEF, dia-PASEF, and diagonal-PASEF methods.\n\n" 
-            "3. Method Reporting: Generates comprehensive method reports in " 
-            "both PDF and CSV formats for documentation or publication.\n\n" 
-            "Disclaimer: This is an independent, third-party tool and is not an " 
-            "official Bruker product, nor is it affiliated with or supported by Bruker." 
-        ) 
+        description_text = (
+            "timsCompare is a desktop application for mass spectrometry users, designed to analyze "
+            "and compare Bruker's .d / .m methods. It handles multi-segment methods and supports "
+            "a wide range of acquisition modes including PASEF, dia-PASEF, diagonal-PASEF, and more.\n\n"
+            "Methods can be loaded using the 'Add Data' button or via drag-and-drop.\n\n"
+            "The tool's core functionalities are:\n\n"
+            "1. Parameter Comparison: Provides a detailed, side-by-side view of acquisition "
+            "parameters (including instrument model and method version), automatically highlighting differences. "
+            "Users can customize the default parameters shown for each scan mode via the 'Manage Views' option.\n\n"
+            "2. Window Export: Offers a function to export the isolation "
+            "window definitions for PASEF, dia-PASEF, and diagonal-PASEF methods.\n\n"
+            "3. Method Reporting: Generates comprehensive method reports in "
+            "both PDF and CSV formats for documentation or publication.\n\n"
+            "Disclaimer: This is an independent, third-party tool and is not an "
+            "official Bruker product, nor is it affiliated with or supported by Bruker."
+        )
         desc_label = ctk.CTkLabel( 
             main_frame, 
             text=description_text, 
@@ -148,7 +150,7 @@ class AboutDialog(ctk.CTkToplevel):
         
         libs_label = ctk.CTkLabel( 
             main_frame, 
-            text="Built with: Python, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, and tkinterdnd2", 
+            text="Built with: Python, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, tkinterdnd2, fontTools, defusedxml", 
             font=ctk.CTkFont(size=11), 
             text_color="gray60" 
         ) 
@@ -229,7 +231,11 @@ class AboutDialog(ctk.CTkToplevel):
             full_text = "timsCompare is built using several open-source libraries.\nWe gratefully acknowledge the contributions of their developers.\n\n"
             full_text += "=" * 70 + "\n\n"
 
-            for lib_name, info in licenses.items():
+            for lib_name in sorted(licenses.keys()):
+                info = licenses[lib_name]
+                full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
+                full_text += f"{info.get('text', 'No license text found.')}\n\n"
+                full_text += "=" * 70 + "\n\n"
                 full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
                 full_text += f"{info.get('text', 'No license text found.')}\n\n"
                 full_text += "=" * 70 + "\n\n"
@@ -299,6 +305,8 @@ class timsCompareApp:
         self.remove_var = ctk.StringVar() 
         self.plots_visible = tk.BooleanVar(value=True) 
         self.show_only_diffs_var = tk.BooleanVar(value=False) 
+        self.autofit_plots_var = tk.BooleanVar(value=True) 
+
         self._resize_job: Optional[str] = None 
         self._remove_menu_resize_job: Optional[str] = None 
 
@@ -328,6 +336,14 @@ class timsCompareApp:
 
         self.reset_params_button = ctk.CTkButton(top_frame, text="Reset View", image=self.reset_icon, command=self._reset_to_default_parameters) 
         self.reset_params_button.pack(side="left", padx=(0, 15)) 
+
+        self.manage_view_button = ctk.CTkButton(
+            top_frame,
+            text="Manage Views",
+            image=self.manage_views_icon,
+            command=self._open_view_manager
+        )
+        self.manage_view_button.pack(side="left", padx=(0, 15))
 
         self.show_diffs_button = ctk.CTkButton(top_frame, text="Show only differences", image=self.diffs_unchecked_icon, command=self._toggle_show_differences, width=28, height=28, fg_color="transparent") 
         self.show_diffs_button.pack(side="left", padx=5) 
@@ -386,9 +402,16 @@ class timsCompareApp:
         self.right_plot_container.grid_rowconfigure(1, weight=1) 
         self.right_plot_container.bind("<Configure>", self._on_container_resize) 
 
-        self.plot_toggle_button = ctk.CTkButton(self.right_plot_container, text="", image=self.plots_icon, command=self._show_plot_toggle_menu, width=28, fg_color="transparent", hover_color="#DFE5EA") 
-        self.plot_toggle_button.grid(row=0, column=0, sticky="ne", padx=5, pady=(5,0)) 
-        Tooltip(self.plot_toggle_button, lambda: "Toggle plot visibility") 
+        plot_button_frame = ctk.CTkFrame(self.right_plot_container, fg_color="transparent")
+        plot_button_frame.grid(row=0, column=0, sticky="ne", padx=5, pady=(5,0))
+
+        self.autofit_plot_button = ctk.CTkButton(plot_button_frame, text="", image=self.resize_axis_icon, command=self._toggle_autofit_plots, width=28, fg_color="transparent", hover_color="#DFE5EA")
+        self.autofit_plot_button.pack(side="left", padx=(0, 5))
+        Tooltip(self.autofit_plot_button, lambda: "Toggle Full Axis Range / Autofit")
+
+        self.plot_toggle_button = ctk.CTkButton(plot_button_frame, text="", image=self.plots_icon, command=self._show_plot_toggle_menu, width=28, fg_color="transparent", hover_color="#DFE5EA") 
+        self.plot_toggle_button.pack(side="left") 
+        Tooltip(self.plot_toggle_button, lambda: "Toggle plot visibility")
 
         bottom_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent") 
         bottom_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=(15, 10), sticky="ew") 
@@ -763,120 +786,137 @@ class timsCompareApp:
 
             self.tree.insert(parent_iid, "end", text=f"  Item {i+1}", values=tuple(child_row_values), tags=('diff',) if is_child_different else ()) 
 
-    def _update_treeview_data(self): 
-        for row in self.tree.get_children(): self.tree.delete(row) 
-        if not self.datasets: 
-            self.tree.configure(show="tree"); self.tree.heading("#0", text="") 
-            return 
+    def _update_treeview_data(self):
+        for row in self.tree.get_children(): self.tree.delete(row)
+        if not self.datasets:
+            self.tree.configure(show="tree"); self.tree.heading("#0", text="")
+            return
 
-        self.tree.configure(show="tree headings") 
+        self.tree.configure(show="tree headings")
 
-        if self.displayed_params is None: 
-            self.displayed_params = self.loader.get_default_parameters_for_view(self.datasets) 
+        if self.displayed_params is None:
+            self.displayed_params = self.loader.get_default_parameters_for_view(self.datasets)
 
-        all_display_configs_initial = self.displayed_params 
+        all_display_configs_initial = self.displayed_params
 
-        has_ats_on = any(ds.get_parameter_value("IMS_ATS_Active") == '1' for ds in self.datasets if ds.segments) 
-        has_ats_off = any(ds.get_parameter_value("IMS_ATS_Active") != '1' for ds in self.datasets if ds.segments) 
-        is_mixed_ats_mode = has_ats_on and has_ats_off 
-        all_known_permnames = {p['permname'] for p in self.config.all_definitions} 
-        
-        all_display_configs = [] 
-        for param_config in all_display_configs_initial: 
-            permname = param_config['permname'] 
+        has_ats_on = any(ds.get_parameter_value("IMS_ATS_Active") == '1' for ds in self.datasets if ds.segments)
+        has_ats_off = any(ds.get_parameter_value("IMS_ATS_Active") != '1' for ds in self.datasets if ds.segments)
+        is_mixed_ats_mode = has_ats_on and has_ats_off
+        all_known_permnames = {p['permname'] for p in self.config.all_definitions}
 
-            is_ats_param = "_ATS_" in permname 
-            is_paired = False 
-            if is_ats_param: 
-                counterpart = permname.replace("_ATS_", "_", 1) 
-                if counterpart in all_known_permnames: 
-                    is_paired = True 
-            else: 
-                parts = permname.split('_', 1) 
-                if len(parts) > 1: 
-                    counterpart = f"{parts[0]}_ATS_{parts[1]}" 
-                    if counterpart in all_known_permnames: 
-                        is_paired = True 
+        all_display_configs = []
+        for param_config in all_display_configs_initial:
+            permname = param_config.get('permname')
+            if not permname: continue
 
-            config_to_add = param_config 
-            if is_paired and permname != "IMS_ATS_Active": 
-                if is_mixed_ats_mode: 
-                    if is_ats_param: 
-                        config_to_add = copy.copy(param_config) 
-                        config_to_add['label'] = f"{param_config.get('label', permname)} (Stepping active)" 
-                elif has_ats_on: 
-                    if not is_ats_param: continue 
+            is_ats_param = "_ATS_" in permname
+            is_paired = False
+            if is_ats_param:
+                counterpart = permname.replace("_ATS_", "_", 1)
+                if counterpart in all_known_permnames: is_paired = True
+            else:
+                parts = permname.split('_', 1)
+                if len(parts) > 1:
+                    counterpart = f"{parts[0]}_ATS_{parts[1]}"
+                    if counterpart in all_known_permnames: is_paired = True
+
+            config_to_add = param_config
+            if is_paired and permname != "IMS_ATS_Active":
+                if is_mixed_ats_mode:
+                    if is_ats_param:
+                        config_to_add = copy.copy(param_config)
+                        config_to_add['label'] = f"{param_config.get('label', permname)} (Stepping active)"
+                elif has_ats_on:
+                    if not is_ats_param: continue
                 else: 
-                    if is_ats_param: continue 
-            elif is_ats_param and not has_ats_on and permname != "IMS_ATS_Active": 
-                continue 
-            
-            all_display_configs.append(config_to_add) 
+                    if is_ats_param: continue
+            elif is_ats_param and not has_ats_on and permname != "IMS_ATS_Active":
+                continue
 
-        displayed_permnames = {p['permname'] for p in all_display_configs} 
-        if "calc_scan_mode" in displayed_permnames: 
-            all_display_configs = [p for p in all_display_configs if p.get('permname') != "Mode_ScanMode"] 
+            all_display_configs.append(config_to_add)
 
-        grouped_params = defaultdict(list) 
-        for p_config in all_display_configs: 
-            grouped_params[p_config.get("category", "General")].append(p_config) 
-        
-        if "Mode" not in grouped_params:
-            grouped_params["Mode"] = []
+        displayed_permnames = {p['permname'] for p in all_display_configs}
+        if "calc_scan_mode" in displayed_permnames:
+            all_display_configs = [p for p in all_display_configs if p.get('permname') != "Mode_ScanMode"]
 
-        calib_param_config = {
-            "permname": "calc_is_calibration",
-            "label": "Calibration Segment",
-            "category": "Mode"
-        }
-        grouped_params["Mode"].insert(0, calib_param_config)
+        grouped_params = defaultdict(list)
+        for p_config in all_display_configs:
+            grouped_params[p_config.get("category", "General")].append(p_config)
 
-        def sort_key(g): 
-            if g == "Mode": return (0, g) 
-            if g == "Calculated Parameters": return (2, g) 
-            return (1, g) 
-        sorted_groups = sorted(grouped_params.keys(), key=sort_key) 
+        if "Mode" not in grouped_params: grouped_params["Mode"] = []
+        calib_param_config = {"permname": "calc_is_calibration", "label": "Calibration Segment", "category": "Mode"}
+        if not any(p['permname'] == 'calc_is_calibration' for p in grouped_params["Mode"]):
+             grouped_params["Mode"].insert(0, calib_param_config)
 
-        default_params_for_sorting = self.loader.get_default_parameters_for_view(self.datasets) 
-        order_map = {p['permname']: i for i, p in enumerate(default_params_for_sorting)} 
+        def sort_key(g):
+            if g == "General": return (0, g)
+            if g == "Mode": return (1, g)
+            if g == "Calculated Parameters": return (99, g)
+            return (2, g)
+        sorted_groups = sorted(grouped_params.keys(), key=sort_key)
 
-        displayed_param_keys = set() 
-        for group_name in sorted_groups: 
-            parent_node = self.tree.insert("", "end", text=group_name, open=True) 
+        default_params_for_sorting = self.loader.get_default_parameters_for_view(self.datasets)
+        order_map = {p['permname']: i for i, p in enumerate(default_params_for_sorting)}
 
-            params_in_group = sorted( 
-                grouped_params[group_name], 
-                key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', '')) 
-            ) 
+        any_model_identified = any(ds.instrument_model and ds.instrument_model != "Unknown" for ds in self.datasets)
+
+        displayed_param_keys = set()
+        for group_name in sorted_groups:
+
+            parent_node = self.tree.insert("", "end", text=group_name, open=True)
+
+            params_in_group = sorted(
+                grouped_params[group_name],
+                key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', ''))
+            )
 
             for param_config in params_in_group:
                 permname = param_config['permname']
 
-                is_present_in_any_active_segment = any(
-                    permname in ds.segments[ds.active_segment_index].parameters 
-                    for ds in self.datasets
-                )
-
-                if not is_present_in_any_active_segment and permname != "calc_is_calibration":
+                if permname == "calc_instrument_model":
+                    if not any_model_identified:
+                        continue 
+                    values = [(ds.instrument_model if ds.instrument_model != "Unknown" else "N/A") for ds in self.datasets]
+                    self._insert_row(param_config, parent_node, values)
+                    displayed_param_keys.add(permname)
                     continue
-
-                if permname == "calc_is_calibration":
+                # --- END MODIFIED ---
+                elif permname == "calc_tims_control_version":
+                    values = [ds.tims_control_version or "N/A" for ds in self.datasets]
+                    self._insert_row(param_config, parent_node, values)
+                    displayed_param_keys.add(permname)
+                    continue
+                elif permname == "calc_last_modified_date":
+                    values = [ds.last_modified_date or "N/A" for ds in self.datasets]
+                    formatted_values = []
+                    for v in values:
+                         try: formatted_values.append(v.split('T')[0] if v and 'T' in v else v or "N/A")
+                         except: formatted_values.append(v or "N/A")
+                    self._insert_row(param_config, parent_node, formatted_values)
+                    displayed_param_keys.add(permname)
+                    continue
+                elif permname == "calc_is_calibration":
                     calib_values = []
                     for ds in self.datasets:
-                        try:
-                            active_segment = ds.segments[ds.active_segment_index]
-                            calib_values.append("Yes" if active_segment.is_calibration_segment else "No")
-                        except IndexError:
-                            calib_values.append("N/A")
+                        try: calib_values.append("Yes" if ds.segments[ds.active_segment_index].is_calibration_segment else "No")
+                        except IndexError: calib_values.append("N/A")
                     self._insert_row(param_config, parent_node, calib_values)
                     displayed_param_keys.add(permname)
                     continue
 
+                is_present_in_any_active_segment = any(
+                    permname in ds.segments[ds.active_segment_index].parameters
+                    for ds in self.datasets if ds.segments
+                )
+                if not is_present_in_any_active_segment: continue
                 if permname in displayed_param_keys: continue
-                
-                raw_values = [ds.get_parameter_value(permname) for ds in self.datasets]
-                is_list_param = any(isinstance(val, list) for val in raw_values)
 
+                raw_values = []
+                for ds in self.datasets:
+                     try: raw_values.append(ds.segments[ds.active_segment_index].parameters.get(permname))
+                     except IndexError: raw_values.append(None)
+
+                is_list_param = any(isinstance(val, list) for val in raw_values)
                 if is_list_param:
                     self._insert_expandable_list_rows(param_config, parent_node, raw_values)
                 else:
@@ -885,16 +925,16 @@ class timsCompareApp:
 
                 displayed_param_keys.add(permname)
 
-        for parent_iid in self.tree.get_children(''): 
-            children = self.tree.get_children(parent_iid) 
-            if not children: 
-                self.tree.delete(parent_iid) 
-            else: 
-                for i, child_iid in enumerate(children): 
-                    tag = 'evenrow' if i % 2 == 0 else 'oddrow' 
-                    current_tags = [t for t in list(self.tree.item(child_iid, 'tags')) if t not in ['evenrow', 'oddrow']] 
-                    current_tags.append(tag) 
-                    self.tree.item(child_iid, tags=tuple(current_tags)) 
+        for parent_iid in self.tree.get_children(''):
+            children = self.tree.get_children(parent_iid)
+            if not children:
+                self.tree.delete(parent_iid)
+            else:
+                for i, child_iid in enumerate(children):
+                    tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+                    current_tags = [t for t in list(self.tree.item(child_iid, 'tags')) if t not in ['evenrow', 'oddrow']]
+                    current_tags.append(tag)
+                    self.tree.item(child_iid, tags=tuple(current_tags))
 
     def _setup_styles(self): 
         style = ttk.Style() 
@@ -1002,6 +1042,18 @@ class timsCompareApp:
 
     def _show_plot_toggle_menu(self): 
         self.plot_toggle_menu.tk_popup(self.plot_toggle_button.winfo_rootx(), self.plot_toggle_button.winfo_rooty() + self.plot_toggle_button.winfo_height()) 
+    
+    def _toggle_autofit_plots(self):
+        new_state = not self.autofit_plots_var.get()
+        self.autofit_plots_var.set(new_state)
+        
+        if new_state: 
+            self.autofit_plot_button.configure(fg_color="transparent")
+        else: 
+            self.autofit_plot_button.configure(fg_color="#0071BC") 
+        
+        self.logger.debug(f"Plot autofit state set to: {new_state}")
+        self._update_plot_grid() 
 
     def _update_plot_grid(self): 
         if not self.plots_canvas or not self.plots_canvas.winfo_exists(): return 
@@ -1019,13 +1071,15 @@ class timsCompareApp:
         cell_width_px = max(50, (container_width // num_cols) - 25) 
         cell_height_px = max(50, int(cell_width_px * 0.8)) 
 
+        autofit_state = self.autofit_plots_var.get()
+
         for i, ds in enumerate(plots_to_render): 
             row, col = divmod(i, num_cols) 
             self.plots_canvas.grid_rowconfigure(row, minsize=cell_height_px) 
             plot_frame = ctk.CTkFrame(self.plots_canvas, fg_color="transparent", width=cell_width_px, height=cell_height_px) 
             plot_frame.grid(row=row, column=col, sticky="nsew", padx=5, pady=5); plot_frame.grid_propagate(False) 
 
-            ctk_image = self.plotter.create_plot_image(ds, cell_width_px, cell_height_px) 
+            ctk_image = self.plotter.create_plot_image(ds, cell_width_px, cell_height_px, autofit=autofit_state)
             if ctk_image: #
                 plot_label = ctk.CTkLabel(plot_frame, image=ctk_image, text="") 
                 plot_label.pack(fill="both", expand=True) 
@@ -1174,7 +1228,7 @@ class timsCompareApp:
             self.export_icon = ctk.CTkImage(Image.open(os.path.join(assets, "export.png")), size=(20, 20)) 
             self.diffs_checked_icon = ctk.CTkImage(Image.open(os.path.join(assets, "checkbox_checked_inv.png")), size=(22, 22)) 
             self.diffs_unchecked_icon = ctk.CTkImage(Image.open(os.path.join(assets, "checkbox_unchecked_inv.png")), size=(22, 22)) 
-            self.plots_icon = ctk.CTkImage(Image.open(os.path.join(assets, "plots.png")), size=(14, 20)) 
+            self.plots_icon = ctk.CTkImage(Image.open(os.path.join(assets, "plots.png")), size=(20, 20)) 
             self.hide_icon = ctk.CTkImage(Image.open(os.path.join(assets, "hide.png")), size=(20, 19)) 
             self.remove_icon = ctk.CTkImage(Image.open(os.path.join(assets, "remove.png")), size=(20, 20)) 
             self.about_icon = ctk.CTkImage(Image.open(os.path.join(assets, "about.png")), size=(20, 20)) 
@@ -1185,6 +1239,8 @@ class timsCompareApp:
                 dark_image=gh_logo_original, 
                 size=(49, 20) 
             ) 
+            self.manage_views_icon = ctk.CTkImage(Image.open(os.path.join(assets, "manage_views.png")), size=(20, 20))
+            self.resize_axis_icon = ctk.CTkImage(Image.open(os.path.join(assets, "resize_axis.png")), size=(20, 14))
         except FileNotFoundError as e: print(f"Warning: Could not load icon files. {e}") 
 
     def _toggle_show_differences(self): 
@@ -1195,3 +1251,17 @@ class timsCompareApp:
 
     def _show_about_dialog(self):
         AboutDialog(self.root, self.about_icon, self.github_icon, self.config)
+
+    def _open_view_manager(self):
+        self.logger.info("Opening View Manager dialog...")
+        try:
+            dialog = ViewManager(self.root, self.config, self.loader)
+            dialog.wait_window() 
+
+            self.logger.info("View Manager closed. Refreshing main view.")
+            self.displayed_params = None 
+            self._redraw_ui()
+
+        except Exception as e:
+            self.logger.error("Error opening or handling View Manager dialog.", exc_info=True)
+            messagebox.showerror("Error", f"Could not open View Manager:\n{e}")

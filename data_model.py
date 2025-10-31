@@ -30,6 +30,10 @@ class Dataset:
         self.active_segment_index: int = 0
         self.is_plotted_var = tk.BooleanVar(value=True)
 
+        self.instrument_model: Optional[str] = None
+        self.tims_control_version: Optional[str] = None
+        self.last_modified_date: Optional[str] = None
+
         self.default_params: List[Dict] = []
         self.available_optional_params: List[Dict] = []
         self.user_added_params: List[Dict] = [] 

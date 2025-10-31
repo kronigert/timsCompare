@@ -25,6 +25,17 @@ from app_config import AppConfig
 from data_model import Dataset, Segment 
 from utils import format_parameter_value, resource_path 
 
+INSTRUMENT_KEY_MAP = {
+    "UNKNOWN_PRO_KEY": "timsTOF Pro",
+    "0x3021": "timsTOF PRO 2",
+    "0x7823": "timsTOF SCP",
+    "0x3843": "timsTOF Ultra",
+    "0x3846": "timsTOF Ultra 2",
+    "0x7846": "timsUltra AIP",
+    "0x3044": "timsTOF HT",
+    "0x3002": "timsTOF fleX",
+    "0x7022": "timsMetabo"
+}
 
 class DataProcessingError(Exception): 
     pass
@@ -45,72 +56,81 @@ class DataLoaderService:
     def get_default_parameters_for_dataset(self, dataset: Dataset) -> List[Dict]: 
         return self.get_default_parameters_for_view([dataset]) 
 
-    def get_default_parameters_for_view(self, datasets: List[Dataset]) -> List[Dict]: 
-        if not datasets: 
-            return [] 
+    def get_default_parameters_for_view(self, datasets: List[Dataset]) -> List[Dict]:
+        if not datasets:
+            return []
 
-        has_multisegment_file = any(len(ds.segments) > 1 for ds in datasets) 
-        has_advanced_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") == '1' for ds in datasets for s in ds.segments) 
-        has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for ds in datasets for s in ds.segments) 
-        has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for ds in datasets for s in ds.segments) 
-        has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for ds in datasets for s in ds.segments) 
+        has_multisegment_file = any(len(ds.segments) > 1 for ds in datasets)
+        has_advanced_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") == '1' for ds in datasets for s in ds.segments)
+        has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for ds in datasets for s in ds.segments)
+        has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for ds in datasets for s in ds.segments)
+        has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for ds in datasets for s in ds.segments)
         has_msms_stepping = any(s.parameters.get("Ims_Stepping_Active") == '1' for ds in datasets for s in ds.segments)
 
-        all_workflows_in_dataset = {s.workflow_name for ds in datasets for s in ds.segments if s.workflow_name} 
-        default_params_by_workflow = self.config.parameter_definitions 
+        all_workflows_in_dataset = {s.workflow_name for ds in datasets for s in ds.segments if s.workflow_name}
+        default_params_by_workflow = self.config.parameter_definitions
 
-        default_permnames_ordered = [] 
-        seen_permnames = set() 
+        default_permnames_ordered = []
+        seen_permnames = set()
 
-        def add_unique(permnames): 
-            for pname in permnames: 
-                if pname not in seen_permnames: 
-                    seen_permnames.add(pname) 
-                    default_permnames_ordered.append(pname) 
+        def add_unique(permnames):
+            if permnames:
+                for pname in permnames:
+                    if pname not in seen_permnames:
+                        seen_permnames.add(pname)
+                        default_permnames_ordered.append(pname)
 
-        add_unique(default_params_by_workflow.get('__GENERAL__', [])) 
+        add_unique(default_params_by_workflow.get('__GENERAL__', []))
         for wf in sorted(list(all_workflows_in_dataset)):
-            add_unique(default_params_by_workflow.get(wf, [])) 
-        
-        if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames: 
-            default_permnames_ordered.remove("Mode_ScanMode") 
+            add_unique(default_params_by_workflow.get(wf, []))
 
-        all_definitions_map = {p['permname']: p for p in self.config.all_definitions} 
-        default_param_configs = [] 
+        if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames:
+            if "Mode_ScanMode" in default_permnames_ordered:
+                 default_permnames_ordered.remove("Mode_ScanMode")
 
-        for pname in default_permnames_ordered: 
-            if pname in ["calc_segment_start_time", "calc_segment_end_time"] and not has_multisegment_file: continue 
-            if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue 
-            if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue 
-            if pname == 'IMSICC_Target' and not has_icc_mode1: continue 
+        all_definitions_map = {p['permname']: p for p in self.config.all_definitions}
+        default_param_configs = []
+
+        for pname in default_permnames_ordered:
+            if pname in ["calc_segment_start_time", "calc_segment_end_time"] and not has_multisegment_file: continue
+            if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue
+            if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue
+            if pname == 'IMSICC_Target' and not has_icc_mode1: continue
             if pname == 'calc_msms_stepping_display_list' and not has_msms_stepping: continue
-            
-            mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"] 
-            if pname in mode2_params and not has_icc_mode2: continue 
+
+            mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"]
+            if pname in mode2_params and not has_icc_mode2: continue
 
             param_config = all_definitions_map.get(pname)
-            
+
             if not param_config:
                 if pname.startswith("calc_"):
-                    label_map = {
-                        "calc_scan_area_mz": "Window Scan Area",
-                        "calc_ramps": "Ramps per Cycle",
-                        "calc_ms1_scans": "MS1 Scans per Cycle",
-                        "calc_steps": "Isolation Steps per Cycle",
-                        "calc_mz_width": "Isolation Window Width",
-                        "calc_ce_ramping_start": "CE Ramping Start",
-                        "calc_ce_ramping_end": "CE Ramping End",
-                        "calc_msms_stepping_display_list": "MS/MS Stepping Details"
+                    calc_param_details = {
+                        "calc_scan_area_mz": ("Window Scan Area", "Calculated Parameters"),
+                        "calc_ramps": ("Ramps per Cycle", "Calculated Parameters"),
+                        "calc_ms1_scans": ("MS1 Scans per Cycle", "Calculated Parameters"),
+                        "calc_steps": ("Isolation Steps per Cycle", "Calculated Parameters"),
+                        "calc_mz_width": ("Isolation Window Width", "Calculated Parameters"),
+                        "calc_ce_ramping_start": ("CE Ramping Start", "Calculated Parameters"),
+                        "calc_ce_ramping_end": ("CE Ramping End", "Calculated Parameters"),
+                        "calc_msms_stepping_display_list": ("MS/MS Stepping Details", "TIMS"),
+                        "calc_scan_mode": ("Scan Mode", "Mode"), 
+                        "calc_segment_start_time": ("Segment Start", "Mode"),
+                        "calc_segment_end_time": ("Segment End", "Mode"),
+                        "calc_instrument_model": ("Instrument", "General"), 
+                        "calc_tims_control_version": ("timsControl Version", "General"),
+                        "calc_last_modified_date": ("Last Modified", "General")
                     }
-                    label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title())
-                    if "Stepping" in label:
-                        category = "TIMS"
-                    elif "Scan Mode" in label:
-                        category = "Mode"
+                    if pname in calc_param_details:
+                         label, category = calc_param_details[pname]
+                         param_config = {"permname": pname, "label": label, "category": category}
                     else:
-                        category = "Calculated Parameters"
-                    param_config = {"permname": pname, "label": label, "category": category}
+                         label = pname.replace("calc_", "").replace("_", " ").title()
+                         category = "Calculated Parameters"
+                         param_config = {"permname": pname, "label": label, "category": category}
+
                 else:
+                    self.logger.warning(f"Parameter '{pname}' requested in default view but not found in definitions.")
                     param_config = {
                         "permname": pname,
                         "label": pname.replace("_", " "),
@@ -119,9 +139,9 @@ class DataLoaderService:
 
             if param_config:
                 default_param_configs.append(param_config)
-        
+
         final_params = [p for p in default_param_configs if p.get('permname') != 'Calibration_MarkSegment']
-        
+
         return final_params
 
     def _discover_available_parameters(self, xml_root: ET.Element) -> Tuple[List[Dict], List[Dict]]: 
@@ -155,127 +175,214 @@ class DataLoaderService:
         
         return sorted(list(found_sources))
 
-    def load_dataset_from_folder(self, folder_path: str) -> Dataset: 
-        self.logger.info(f"Attempting to load dataset from: {folder_path}") 
-        self._find_cache.clear() 
-        dataset = Dataset(key_path=folder_path) 
-        method_file = self._find_file(folder_path, ["microtofqimpactemacquisition.method"]) 
-        if not method_file: 
-            error_msg = f"Could not find 'microtofqimpactemacquisition.method' in '{dataset.display_name}'." 
-            self.logger.error(error_msg) 
-            raise MethodFileNotFoundError(error_msg) 
-            
-        dataset.method_file_path = method_file 
-        try: 
-            tree = ET.parse(method_file, parser=ET.XMLParser(encoding="iso-8859-1")) 
-            root = tree.getroot() 
-            dataset.xml_root = root 
-        except ET.ParseError as e: 
-            error_msg = f"Failed to parse XML in {os.path.basename(method_file)}: {e}" 
-            self.logger.error(error_msg, exc_info=True) 
-            raise ParsingError(error_msg) 
-        
+    def load_dataset_from_folder(self, folder_path: str) -> Dataset:
+        self.logger.info(f"Attempting to load dataset from: {folder_path}")
+        self._find_cache.clear()
+        dataset = Dataset(key_path=folder_path)
+        method_file = self._find_file(folder_path, ["microtofqimpactemacquisition.method"])
+        if not method_file:
+            error_msg = f"Could not find 'microtofqimpactemacquisition.method' in '{dataset.display_name}'."
+            self.logger.error(error_msg)
+            raise MethodFileNotFoundError(error_msg)
+
+        dataset.method_file_path = method_file
+        try:
+            tree = ET.parse(method_file, parser=ET.XMLParser(encoding="iso-8859-1"))
+            root = tree.getroot()
+            dataset.xml_root = root
+        except ET.ParseError as e:
+            error_msg = f"Failed to parse XML in {os.path.basename(method_file)}: {e}"
+            self.logger.error(error_msg, exc_info=True)
+            raise ParsingError(error_msg)
+
+        general_info_element = root.find('./generalinfo')
+        if general_info_element is not None:
+            config_element = general_info_element.find('configuration')
+            found_model = None
+            base_appx_key_at_idx2 = None
+
+            if config_element is not None and config_element.text:
+                config_parts = config_element.text.split()
+
+                if len(config_parts) >= 3:
+                    base_appx_key_at_idx2 = config_parts[2]
+                    if base_appx_key_at_idx2 in INSTRUMENT_KEY_MAP:
+                        found_model = INSTRUMENT_KEY_MAP[base_appx_key_at_idx2]
+                        self.logger.debug(f"Found model via appx_key at index 2 '{base_appx_key_at_idx2}': {found_model}")
+
+                if found_model is None:
+                    self.logger.debug(f"Appx_key at index 2 ('{base_appx_key_at_idx2}') not found/valid. Scanning entire config string for a known key.")
+                    known_keys = set(INSTRUMENT_KEY_MAP.keys())
+                    for part in config_parts:
+                        if part in known_keys:
+                            found_model = INSTRUMENT_KEY_MAP[part]
+                            self.logger.debug(f"Found model via key scan (key '{part}' found anywhere): {found_model}")
+                            break
+
+                if found_model is None:
+                    self.logger.debug(f"No known key found. Scanning config string for an *exact* model name match (case-insensitive, ignores leading '_').")
+                    known_model_names_map = {name.lower().replace(" ", "_"): name for name in INSTRUMENT_KEY_MAP.values()}
+
+                    for part in config_parts:
+                        part_normalized_lower = part.lstrip('_').lower() 
+
+                        if part_normalized_lower in known_model_names_map:
+                            found_model = known_model_names_map[part_normalized_lower]
+                            self.logger.debug(f"Found model via *exact* name match ('{part}' -> '{part_normalized_lower}'): {found_model}")
+                            break 
+
+            if found_model:
+                dataset.instrument_model = found_model
+            else:
+                self.logger.warning(f"Could not determine instrument model from key or name scan. Key at index 2 was '{base_appx_key_at_idx2}'. Defaulting to 'Unknown'.")
+                dataset.instrument_model = "Unknown"
+
+            version_element = general_info_element.find('modified-by-timstof')
+            if version_element is not None and version_element.text:
+                dataset.tims_control_version = version_element.text.strip()
+            else:
+                 self.logger.warning("Could not find <modified-by-timstof> tag.")
+
+            date_element = general_info_element.find('modified-by-timstof-on')
+            if date_element is not None and date_element.text:
+                dataset.last_modified_date = date_element.text.strip()
+            else:
+                 self.logger.warning("Could not find <modified-by-timstof-on> tag.")
+        else:
+            self.logger.warning("Could not find <generalinfo> section in the method file.")
+            dataset.instrument_model = "Unknown"
+
         dataset.available_sources = self._discover_available_sources(root)
         self.logger.debug(f"Discovered {len(dataset.available_sources)} ion sources in method: {dataset.available_sources}")
-        
-        default_params, optional_params = self._discover_available_parameters(root) 
-        dataset.default_params = default_params 
-        dataset.available_optional_params = optional_params 
-        
-        all_defs_map = {p['permname']: p for p in self.config.all_definitions} 
-        scan_mode_map = all_defs_map.get("Mode_ScanMode", {}).get("value_map", {}) 
-        polarity_map = all_defs_map.get("Mode_IonPolarity", {}).get("value_map", {}) 
-        segment_elements = root.findall('./method/qtofimpactemacq/timetable/segment') 
-        instrument_element = root.find('instrument') 
 
-        if not segment_elements: 
-            new_segment = Segment(start_time=0.0, end_time=-1.0) 
-            new_segment.end_time_display = "N/A" 
-            method_element = root.find('method') 
-            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.") 
-            new_segment.xml_scope_element = method_element 
-            self._parse_and_populate_segment(new_segment, method_element, instrument_element, scan_mode_map, polarity_map, folder_path, {}) 
-            dataset.segments.append(new_segment) 
-        else: 
-            last_end_time = 0.0 
-            
-            method_element = root.find('method') 
-            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.") 
-            
-            global_polarity_el = method_element.find(f".//*[@permname='Mode_IonPolarity']") 
-            global_polarity_val = self._get_value_from_element(global_polarity_el, {}) or '0' 
-            global_polarity_str = polarity_map.get(str(global_polarity_val)) #
+        default_params, optional_params = self._discover_available_parameters(root)
+        dataset.default_params = default_params
+        dataset.available_optional_params = optional_params
 
-            last_segment_params = self._parse_parameters_for_scope( 
+        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        scan_mode_map = all_defs_map.get("Mode_ScanMode", {}).get("value_map", {})
+        polarity_map = all_defs_map.get("Mode_IonPolarity", {}).get("value_map", {})
+        segment_elements = root.findall('./method/qtofimpactemacq/timetable/segment')
+        instrument_element = root.find('instrument')
+
+        if not segment_elements:
+            new_segment = Segment(start_time=0.0, end_time=-1.0)
+            new_segment.end_time_display = "N/A"
+            method_element = root.find('method')
+            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.")
+            
+            self._parse_and_populate_segment(new_segment, method_element, method_element, instrument_element, scan_mode_map, polarity_map, folder_path, {})
+            dataset.segments.append(new_segment)
+        else:
+            last_end_time = 0.0
+
+            method_element = root.find('method')
+            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.")
+
+            global_polarity_el = method_element.find(f".//*[@permname='Mode_IonPolarity']")
+            global_polarity_val = self._get_value_from_element(global_polarity_el, {}) or '0'
+            global_polarity_str = polarity_map.get(str(global_polarity_val))
+
+            base_params = self._parse_parameters_for_scope(
+                instrument_element, 
+                instrument_element, 
+                self.config.all_definitions,
+                None 
+            )
+
+            method_params = self._parse_parameters_for_scope(
                 method_element, 
                 instrument_element, 
-                self.config.all_definitions, 
-                global_polarity_str 
-            ) 
+                self.config.all_definitions,
+                global_polarity_str
+            )
+            base_params.update(method_params)
+            last_segment_params = base_params
 
-            for seg_element in segment_elements: 
-                end_time_str = seg_element.attrib.get("endtime", "-1") 
-                try: 
-                    end_time = float(end_time_str) 
-                except ValueError: 
-                    end_time = -1.0 
-                
-                new_segment = Segment(start_time=last_end_time, end_time=end_time) 
-                
-                if end_time < 0: 
-                    new_segment.end_time_display = "Open End" 
-                
-                new_segment.xml_scope_element = seg_element 
-                
+            for seg_element in segment_elements:
+                end_time_str = seg_element.attrib.get("endtime", "-1")
+                try:
+                    end_time = float(end_time_str)
+                except ValueError:
+                    end_time = -1.0
+
+                new_segment = Segment(start_time=last_end_time, end_time=end_time)
+
+                if end_time < 0:
+                    new_segment.end_time_display = "Open End"
+
+                new_segment.xml_scope_element = seg_element
+
                 unfiltered_params_for_next_segment = self._parse_and_populate_segment(
-                    new_segment, seg_element, instrument_element, 
+                    new_segment, seg_element, method_element, instrument_element,
                     scan_mode_map, polarity_map, folder_path, last_segment_params
                 )
-                dataset.segments.append(new_segment) 
-                
-                if end_time >= 0: 
-                    last_end_time = end_time 
-                
+                dataset.segments.append(new_segment)
+
+                if end_time >= 0:
+                    last_end_time = end_time
+
                 last_segment_params = unfiltered_params_for_next_segment
-        
-        self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully with {len(dataset.segments)} segment(s).") 
 
-        if ENABLE_DEBUG_LOGGING: 
-            known_permnames_set = {p['permname'] for p in self.config.all_definitions} 
-            total_known_permnames = len(known_permnames_set) 
-            
-            self.logger.debug("--- Data Loading Summary for %s ---", dataset.display_name) 
-            for i, segment in enumerate(dataset.segments): 
-                found_with_values = sum(1 for p in segment.parameters if p in known_permnames_set) 
-                
-                self.logger.debug( 
-                    "  Segment %d: Found values for %d of %d known parameters.", 
-                    i + 1, 
-                    found_with_values, 
-                    total_known_permnames 
-                ) 
-            self.logger.debug("-------------------------------------------------") 
-        
-        return dataset 
+        self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully with {len(dataset.segments)} segment(s).")
 
-    def _parse_and_populate_segment(self, new_segment: Segment, param_scope_element: ET.Element, 
+        if ENABLE_DEBUG_LOGGING:
+            known_permnames_set = {p['permname'] for p in self.config.all_definitions}
+            total_known_permnames = len(known_permnames_set)
+
+            self.logger.debug("--- Data Loading Summary for %s ---", dataset.display_name)
+            for i, segment in enumerate(dataset.segments):
+                found_with_values = sum(1 for p in segment.parameters if p in known_permnames_set)
+
+                self.logger.debug(
+                    "  Segment %d: Found values for %d of %d known parameters.",
+                    i + 1,
+                    found_with_values,
+                    total_known_permnames
+                )
+            self.logger.debug("-------------------------------------------------")
+
+        return dataset
+
+    def _parse_and_populate_segment(self, new_segment: Segment, 
+                                     segment_scope_element: ET.Element, 
+                                     method_scope_element: ET.Element,
                                      instrument_scope_element: Optional[ET.Element], 
-                                     scan_mode_map: Dict, polarity_map: Dict, folder_path: str, previous_params: Dict) -> Dict:
-        unfiltered_params = previous_params.copy() 
+                                     scan_mode_map: Dict, polarity_map: Dict, folder_path: str, 
+                                     previous_params: Dict) -> Dict:
         
-        current_polarity_el = param_scope_element.find(f".//*[@permname='Mode_IonPolarity']") 
-        current_polarity_val = self._get_value_from_element(current_polarity_el, {}) 
-        final_polarity_raw_val = current_polarity_val if current_polarity_val is not None else unfiltered_params.get("Mode_IonPolarity") 
-        polarity_string = polarity_map.get(str(final_polarity_raw_val)) 
-
-        parsed_values = self._parse_parameters_for_scope( 
-            param_scope_element, 
-            instrument_scope_element, 
-            self.config.all_definitions, 
-            polarity_string,
-            ion_source=None 
-        ) 
-        unfiltered_params.update(parsed_values)
+        unfiltered_params = previous_params.copy()
+        
+        current_polarity_el = segment_scope_element.find(f".//*[@permname='Mode_IonPolarity']")
+        current_polarity_val = self._get_value_from_element(current_polarity_el, {})
+        
+        final_polarity_raw_val = current_polarity_val if current_polarity_val is not None else unfiltered_params.get("Mode_IonPolarity")
+        polarity_string = polarity_map.get(str(final_polarity_raw_val))
+        
+        if instrument_scope_element is not None:
+            instrument_values = self._parse_parameters_for_scope(
+                instrument_scope_element,
+                instrument_scope_element,
+                self.config.all_definitions,
+                polarity_string
+            )
+            unfiltered_params.update(instrument_values) 
+        
+        method_values = self._parse_parameters_for_scope(
+            method_scope_element,
+            instrument_scope_element,
+            self.config.all_definitions,
+            polarity_string
+        )
+        unfiltered_params.update(method_values) 
+        
+        segment_values = self._parse_parameters_for_scope(
+            segment_scope_element,
+            instrument_scope_element,
+            self.config.all_definitions,
+            polarity_string
+        )
+        unfiltered_params.update(segment_values) 
         
         all_defs_map = {p['permname']: p for p in self.config.all_definitions}
         ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
@@ -295,23 +402,23 @@ class DataLoaderService:
                             except (ValueError, IndexError):
                                 self.logger.warning(f"Could not resolve dependent parameter {permname} using driver {driver_permname} with value {driver_value}.")
         
-        scan_mode_val = unfiltered_params.get("Mode_ScanMode") 
+        scan_mode_val = unfiltered_params.get("Mode_ScanMode")
         workflow_name = scan_mode_map.get(str(scan_mode_val))
         
-        if workflow_name is None: 
-            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {new_segment.start_time:.2f} min.") 
+        if workflow_name is None:
+            raise UnsupportedScanModeError(f"Unsupported Scan Mode: '{scan_mode_val}' found in segment starting at {new_segment.start_time:.2f} min.")
 
         new_segment.workflow_name = workflow_name
         
-        try: 
-            new_segment.scan_mode_id = int(scan_mode_val) 
-        except (ValueError, TypeError): 
-            new_segment.scan_mode_id = None 
+        try:
+            new_segment.scan_mode_id = int(scan_mode_val)
+        except (ValueError, TypeError):
+            new_segment.scan_mode_id = None
 
         new_segment.parameters = unfiltered_params
         
-        self._perform_calculations(new_segment, folder_path, polarity_map) 
-        self._apply_conditional_logic(new_segment) 
+        self._perform_calculations(new_segment, folder_path, polarity_map)
+        self._apply_conditional_logic(new_segment)
         
         allowed_permnames = set(self.config.parameter_definitions.get('__GENERAL__', []))
         workflow_specific_params = self.config.parameter_definitions.get(workflow_name, [])
@@ -383,67 +490,68 @@ class DataLoaderService:
                  return [entry.text for entry in element] 
         return element.attrib.get("value") 
 
-    def _parse_parameters_for_scope(self, method_scope_element: ET.Element, 
+    def _parse_parameters_for_scope(self, 
+                                     param_scope_element: ET.Element, 
                                      instrument_scope_element: Optional[ET.Element], 
                                      param_info: List[Dict], 
                                      ion_polarity: Optional[str], 
                                      ion_source: Optional[str] = None) -> Dict:
-        results = {} 
-        all_param_defs_map = {p['permname']: p for p in self.config.all_definitions} 
-        ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4} 
+        results = {}
+        all_param_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
 
-        def find_and_get_value(p_config: Dict, current_results: Dict) -> Optional[Any]: 
-            permname = p_config.get('permname') 
-            if not permname: 
-                return None 
-                
-            full_config = all_param_defs_map.get(permname, {}) 
-            search_config = p_config.copy() 
-            
-            driver_permname = full_config.get("lookup_driven_by") 
-            if driver_permname: 
-                driver_value = current_results.get(driver_permname) 
-                if driver_value is not None: 
-                    dynamic_index = ime_x_mode_to_index.get(str(driver_value)) 
-                    if dynamic_index is not None: 
-                        search_config['entry_index'] = dynamic_index 
+        def find_and_get_value(p_config: Dict, current_results: Dict) -> Optional[Any]:
+            permname = p_config.get('permname')
+            if not permname:
+                return None
 
-            location = full_config.get("location", "method") 
-            search_root = instrument_scope_element if location == 'instrument' else method_scope_element 
+            full_config = all_param_defs_map.get(permname, {})
+            search_config = p_config.copy()
+
+            driver_permname = full_config.get("lookup_driven_by")
+            if driver_permname:
+                driver_value = current_results.get(driver_permname)
+                if driver_value is not None:
+                    dynamic_index = ime_x_mode_to_index.get(str(driver_value))
+                    if dynamic_index is not None:
+                        search_config['entry_index'] = dynamic_index
+
+            location = full_config.get("location", "method")
             
-            if search_root is None: return None 
-            
-            found_element = None 
-            
+            search_root = instrument_scope_element if location == 'instrument' else param_scope_element
+            if search_root is None:
+                 return None
+
+
+            found_element = None
+
             dependent_scopes = []
             for dep_element in search_root.iter('dependent'):
                 pol_attr = dep_element.get('polarity')
                 src_attr = dep_element.get('source')
                 
-                pol_match = pol_attr and ion_polarity and pol_attr.lower() == ion_polarity.lower()
-                src_match = src_attr and ion_source and src_attr.lower() == ion_source.lower()
+                src_match = (src_attr and ion_source and src_attr.lower() == ion_source.lower())
+                pol_match = (pol_attr and ion_polarity and pol_attr.lower() == ion_polarity.lower())
 
                 if pol_match and src_match:
-                    dependent_scopes.insert(0, (3, dep_element)) # Priority 1 (most specific)
+                    dependent_scopes.insert(0, (3, dep_element)) 
                 elif pol_match:
-                    dependent_scopes.append((2, dep_element)) # Priority 2
+                    dependent_scopes.append((2, dep_element)) 
                 elif src_match:
-                    dependent_scopes.append((1, dep_element)) # Priority 3
+                    dependent_scopes.append((1, dep_element)) 
             
             dependent_scopes.sort(key=lambda x: x[0], reverse=True)
+
             for _, scope in dependent_scopes:
                 target = scope.find(f".//*[@permname='{permname}']")
                 if target is not None:
                     found_element = target
-                    break
+                    break 
 
-            if found_element is None: 
-                found_element = search_root.find(f".//*[@permname='{permname}']") 
+            if found_element is None:
+                found_element = search_root.find(f".//*[@permname='{permname}']")
 
-            if found_element is None and location == 'method' and instrument_scope_element is not None: 
-                found_element = instrument_scope_element.find(f".//*[@permname='{permname}']") 
-
-            return self._get_value_from_element(found_element, search_config) 
+            return self._get_value_from_element(found_element, search_config)
 
         dependent_params = [] 
         independent_params = [] 
@@ -486,7 +594,7 @@ class DataLoaderService:
             return None
 
     def _calculate_energy_ramping_params(self, segment: Segment):
-        self.logger = logging.getLogger(__name__) # Ensure logger is available
+        self.logger = logging.getLogger(__name__) 
         
         is_advanced_str = segment.parameters.get("Energy_Ramping_Advanced_Settings_Active") 
         is_advanced = (is_advanced_str == '1') 
@@ -522,7 +630,6 @@ class DataLoaderService:
             advanced_entry_types_str = segment.parameters.get("Energy_Ramping_Advanced_ListEntryType") 
             formatted_entries = []
             
-            # --- MODIFICATION START: Add logging and robust fallback ---
             self.logger.debug("Calculating Advanced CE Ramping:")
             self.logger.debug(f"  - Found Mobility Values: {advanced_mobility_values_str}")
             self.logger.debug(f"  - Found CE Values: {advanced_ce_values_str}")
@@ -533,7 +640,6 @@ class DataLoaderService:
                     mobility_values = [float(v) for v in advanced_mobility_values_str] 
                     ce_values = [float(v) for v in advanced_ce_values_str] 
                     
-                    # If entry types are not defined, assume default type '0' (base) for all entries.
                     if advanced_entry_types_str:
                         entry_types = [int(v) for v in advanced_entry_types_str]
                     else:
@@ -555,7 +661,6 @@ class DataLoaderService:
             else: 
                 self.logger.warning("  - Calculation skipped: Missing Mobility or CE value lists.")
                 segment.parameters["calc_advanced_ce_ramping_display_list"] = ["No advanced values found"]
-            # --- MODIFICATION END ---
             
             segment.parameters["calc_ce_ramping_start"] = "N/A" 
             segment.parameters["calc_ce_ramping_end"] = "N/A"
@@ -797,10 +902,43 @@ class DataLoaderService:
             segment.parameters.update(last_segment_params) 
             segment.parameters.update(new_values) 
             last_segment_params = segment.parameters.copy() 
+    
+    def save_user_view_definitions(self, view_data: Dict[str, List[str]]) -> bool:
+        save_path = self.config.user_view_definitions_path
+        self.logger.info(f"Saving user-defined view definitions to: {save_path}")
+        
+        try:
+            config_dir = os.path.dirname(save_path)
+            os.makedirs(config_dir, exist_ok=True)
+            
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(view_data, f, indent=4)
+                
+            self.config._parameter_definitions = None
+            return True
+            
+        except (IOError, OSError) as e:
+            self.logger.error(f"Failed to save user view definitions: {e}", exc_info=True)
+            return False
+
+    def reset_user_view_definitions(self) -> bool:
+        file_path = self.config.user_view_definitions_path
+        self.logger.info(f"Resetting user view definitions. Deleting: {file_path}")
+        
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+            self.config._parameter_definitions = None
+            return True
+            
+        except (IOError, OSError) as e:
+            self.logger.error(f"Failed to reset user view definitions by deleting file: {e}", exc_info=True)
+            return False
 
 
 class PlottingService: 
-    def generate_plot_as_buffer(self, dataset: Dataset, width_px: int, height_px: int, bg_color: str = "#E4EFF7", for_report: bool = False, dpi: int = 100, show_filename: bool = True) -> Optional[io.BytesIO]: 
+    def generate_plot_as_buffer(self, dataset: Dataset, width_px: int, height_px: int, bg_color: str = "#E4EFF7", for_report: bool = False, dpi: int = 100, show_filename: bool = True, autofit: bool = True) -> Optional[io.BytesIO]: 
         try: 
             active_segment = dataset.segments[dataset.active_segment_index] 
         except IndexError: 
@@ -814,28 +952,43 @@ class PlottingService:
 
         fig = None 
         
+        mz_range = None
+        k0_range = None
+        if not autofit:
+            try:
+                mz_start = float(active_segment.parameters.get("Mode_ScanBegin"))
+                mz_end = float(active_segment.parameters.get("Mode_ScanEnd"))
+                mz_range = (mz_start, mz_end)
+                
+                k0_start = float(active_segment.parameters.get("IMS_imeX_RampStart"))
+                k0_end = float(active_segment.parameters.get("IMS_imeX_RampEnd"))
+                k0_range = (k0_start, k0_end)
+            except (TypeError, ValueError, AttributeError) as e:
+                self.logger.warning(f"Could not parse full axis limits for '{dataset.display_name}', falling back to autofit. Error: {e}")
+                autofit = True 
+
         scan_mode_id = active_segment.scan_mode_id 
         if scan_mode_id == 9 and active_segment.dia_windows_data is not None: # dia-PASEF 
-            fig, _ = self._draw_dia_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False) 
+            fig, _ = self._draw_dia_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False, autofit=autofit, mz_range=mz_range, k0_range=k0_range) 
         elif scan_mode_id == 11 and active_segment.diagonal_pasef_data is not None: # diagonal-PASEF 
-            fig, _ = self._draw_diagonal_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False) 
+            fig, _ = self._draw_diagonal_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False, autofit=autofit, mz_range=mz_range, k0_range=k0_range) 
         elif scan_mode_id == 6 and active_segment.pasef_polygon_data: # PASEF 
-            fig, _ = self._draw_pasef_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False) 
+            fig, _ = self._draw_pasef_plot_figure(active_segment, title, width_px, height_px, bg_color, for_report, is_vector=False, autofit=autofit, mz_range=mz_range, k0_range=k0_range) 
         
         if fig: 
             if for_report: 
                 fig.subplots_adjust(left=0.15, right=0.95, bottom=0.22, top=0.85) 
             return self._render_figure_to_buffer(fig, dpi, 'png') 
-        return None 
+        return None
         
-    def create_plot_image(self, dataset: Dataset, width_px: int, height_px: int) -> Optional[ctk.CTkImage]: 
-        plot_buffer = self.generate_plot_as_buffer(dataset, width_px, height_px) 
+    def create_plot_image(self, dataset: Dataset, width_px: int, height_px: int, autofit: bool = True) -> Optional[ctk.CTkImage]: 
+        plot_buffer = self.generate_plot_as_buffer(dataset, width_px, height_px, autofit=autofit) 
         if plot_buffer: 
             image = Image.open(plot_buffer) 
             image.load() 
             plot_buffer.close() 
             return ctk.CTkImage(light_image=image, dark_image=image, size=(image.width, image.height)) 
-        return None 
+        return None
 
     def _setup_plot(self, width: float, height: float, title: str, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Tuple[plt.Figure, plt.Axes]: 
         if for_report: 
@@ -880,8 +1033,8 @@ class PlottingService:
             return text 
         part_len = (max_len - 3) // 2 
         return f"{text[:part_len]}...{text[-part_len:]}" 
-
-    def _draw_dia_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]: 
+    
+    def _draw_dia_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
         df_prepared = segment.dia_windows_data 
         if df_prepared is None or df_prepared.empty or 'CycleId' not in df_prepared.columns: 
             return None 
@@ -895,10 +1048,22 @@ class PlottingService:
                 (row['x_start'], row['plot_y_start']), row['IsolationWidth'], rect_height, 
                 linewidth=1, edgecolor='#04304D', facecolor=cycle_color_map[row['CycleId']], alpha=0.7) 
             ax.add_patch(rect) 
-        ax.autoscale_view() 
+        if autofit:
+            ax.autoscale_view()
+        elif mz_range and k0_range:
+            try:
+                mz_buffer = (mz_range[1] - mz_range[0]) * 0.05
+                k0_buffer = (k0_range[1] - k0_range[0]) * 0.05
+                ax.set_xlim(mz_range[0] - mz_buffer, mz_range[1] + mz_buffer)
+                ax.set_ylim(k0_range[0] - k0_buffer, k0_range[1] + k0_buffer)
+            except (ValueError, TypeError):
+                self.logger.warning("Could not apply full axis limits, falling back to autoscale.")
+                ax.autoscale_view() 
+        else:
+            ax.autoscale_view() 
         return fig, ax 
 
-    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]: 
+    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
         p = segment.diagonal_pasef_data 
         if p is None: return None 
         slope, origin = p['slope'], p['origin'] 
@@ -924,14 +1089,26 @@ class PlottingService:
             ] 
             polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
             ax.add_patch(polygon) 
-        ax.autoscale_view() 
+        if autofit:
+            ax.autoscale_view()
+        elif mz_range and k0_range:
+            try:
+                mz_buffer = (mz_range[1] - mz_range[0]) * 0.05
+                k0_buffer = (k0_range[1] - k0_range[0]) * 0.05
+                ax.set_xlim(mz_range[0] - mz_buffer, mz_range[1] + mz_buffer)
+                ax.set_ylim(k0_range[0] - k0_buffer, k0_range[1] + k0_buffer)
+            except (ValueError, TypeError):
+                self.logger.warning("Could not apply full axis limits, falling back to autoscale.")
+                ax.autoscale_view() 
+        else:
+            ax.autoscale_view() 
         xlim, ylim = ax.get_xlim(), ax.get_ylim() 
         x_buffer, y_buffer = (xlim[1] - xlim[0]) * 0.05, (ylim[1] - ylim[0]) * 0.05 
         ax.set_xlim(xlim[0] - x_buffer, xlim[1] + x_buffer) 
         ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer) 
         return fig, ax 
 
-    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Optional[Tuple[plt.Figure, plt.Axes]]: 
+    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
         if not segment.pasef_polygon_data: return None 
         mass_coords, mobility_coords = segment.pasef_polygon_data 
         if not mass_coords or not mobility_coords or len(mass_coords) != len(mobility_coords): return None 
@@ -939,7 +1116,19 @@ class PlottingService:
         fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
         polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7) 
         ax.add_patch(polygon) 
-        ax.autoscale_view() 
+        if autofit:
+            ax.autoscale_view()
+        elif mz_range and k0_range:
+            try:
+                mz_buffer = (mz_range[1] - mz_range[0]) * 0.05
+                k0_buffer = (k0_range[1] - k0_range[0]) * 0.05
+                ax.set_xlim(mz_range[0] - mz_buffer, mz_range[1] + mz_buffer)
+                ax.set_ylim(k0_range[0] - k0_buffer, k0_range[1] + k0_buffer)
+            except (ValueError, TypeError):
+                self.logger.warning("Could not apply full axis limits, falling back to autoscale.")
+                ax.autoscale_view() 
+        else:
+            ax.autoscale_view() 
         return fig, ax 
 
     def generate_plot_as_svg_buffer(self, dataset: Dataset, width_in: float, height_in: float, bg_color: str = "white", show_filename: bool = True) -> Optional[io.BytesIO]: 

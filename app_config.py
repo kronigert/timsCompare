@@ -11,6 +11,9 @@ import logging
 from settings import ENABLE_DEBUG_LOGGING
 from _config_data import CONFIG_DATA
 
+USER_CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.timsCompare')
+USER_VIEW_DEFINITIONS_FILENAME = "user_view_definitions.json"
+
 PARAMETER_DEPENDENCY_MAP = {
     "IMS_imeX_RampStart": "IMS_imeX_Mode",
     "IMS_imeX_RampEnd": "IMS_imeX_Mode",
@@ -23,8 +26,11 @@ class AppConfig:
         self.logger = logging.getLogger(__name__)
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.theme_path = os.path.join("config", "blue_theme.json")
+
+        self.user_view_definitions_path = os.path.join(USER_CONFIG_DIR, USER_VIEW_DEFINITIONS_FILENAME)
         
         self._all_definitions: Optional[List[Dict]] = None
+        self._parameter_definitions: Optional[Dict[str, List[str]]] = None
         self._parameter_definitions: Optional[List[str]] = None
         self._display_name_map: Optional[Dict[str, str]] = None
         self._third_party_licenses: Optional[Dict] = None
@@ -36,9 +42,33 @@ class AppConfig:
         return self._all_definitions
 
     @property
-    def parameter_definitions(self) -> List[str]:
-        if self._parameter_definitions is None:
-            self._parameter_definitions = self._load_json_from_file("parameter_definitions.json")
+    def parameter_definitions(self) -> Dict[str, List[str]]:
+        if self._parameter_definitions is not None:
+            return self._parameter_definitions
+
+        if os.path.exists(self.user_view_definitions_path):
+            self.logger.info(f"Loading user-defined view definitions from: {self.user_view_definitions_path}")
+            try:
+                with open(self.user_view_definitions_path, 'r', encoding='utf-8') as f:
+                    user_defs = json.load(f)
+                
+                if isinstance(user_defs, dict) and '__GENERAL__' in user_defs:
+                    self._parameter_definitions = user_defs
+                    return self._parameter_definitions
+                else:
+                    self.logger.warning("User view definitions file is malformed. Falling back to default.")
+            except (IOError, json.JSONDecodeError) as e:
+                self.logger.warning(f"User view definitions file is corrupt or unreadable ({e}). Falling back to default.")
+        
+        self.logger.info("Loading factory default view definitions.")
+        default_defs = self._load_json_from_file("parameter_definitions.json")
+        
+        if isinstance(default_defs, dict):
+             self._parameter_definitions = default_defs
+        else:
+             self.logger.error("Factory default parameter_definitions.json is not a dict! Using empty config.")
+             self._parameter_definitions = {} 
+             
         return self._parameter_definitions
 
     @property
@@ -52,6 +82,20 @@ class AppConfig:
         if self._third_party_licenses is None:
             self._third_party_licenses = self._load_json_from_file("third_party_licenses.json")
         return self._third_party_licenses
+
+    def get_embedded_config_content(self, relative_path: str) -> Optional[str]:
+        normalized_key = relative_path.replace('\\', '/')
+        content = CONFIG_DATA.get(normalized_key)
+        if content is None:
+             base_name_key = os.path.basename(normalized_key)
+             content = CONFIG_DATA.get(base_name_key)
+             if content:
+                 self.logger.debug(f"Found embedded content using basename key: {base_name_key}")
+             else:
+                 self.logger.warning(f"Embedded config content not found for key '{normalized_key}' or basename '{base_name_key}'.")
+        else:
+             self.logger.debug(f"Found embedded content using key: {normalized_key}")
+        return content
 
     def _parse_properties_content(self, content: str) -> Dict[str, str]:
         prop_map = {}
@@ -172,25 +216,52 @@ class AppConfig:
         all_params.sort(key=lambda x: x.get('label', x.get('permname', '')))
         return all_params
 
-    def _load_json_from_file(self, file_name: str) -> List[Any]:
+    def _load_json_from_file(self, file_name: str) -> Dict[str, Any]:
+        json_string = self.get_embedded_config_content(file_name)
+        if not json_string:
+            self.logger.error(f"Failed to load embedded JSON content for: {file_name}")
+            messagebox.showerror("Configuration Error", f"Could not load embedded file: {file_name}")
+            return {}
         try:
-            json_key = next(key for key in CONFIG_DATA if key.endswith(file_name))
-            json_string = CONFIG_DATA[json_key]
             return json.loads(json_string)
-        except (StopIteration, json.JSONDecodeError) as e:
-            self.logger.error("Failed to load or parse embedded JSON %s: %s", file_name, e)
-            messagebox.showerror("Configuration Error", f"Could not load or parse embedded file: {file_name}\n\nDetails: {e}")
-            return []
+        except json.JSONDecodeError as e:
+            self.logger.error("Failed to parse embedded JSON %s: %s", file_name, e)
+            messagebox.showerror("Configuration Error", f"Could not parse embedded file: {file_name}\n\nDetails: {e}")
+            return {} 
             
     def _load_properties_from_config(self, file_name: str) -> Dict[str, str]:
-        try:
-            prop_key = next(key for key in CONFIG_DATA if key.endswith(file_name))
-            content_string = CONFIG_DATA[prop_key]
-            return self._parse_properties_content(content_string)
-        except StopIteration:
-            self.logger.debug("Display name map file not found: %s. Using defaults.", file_name)
+        content_string = self.get_embedded_config_content(file_name)
+        if not content_string:
+            self.logger.warning(f"Embedded properties file not found: {file_name}. Using defaults.")
             return {}
+        try:
+            return self._parse_properties_content(content_string)
         except Exception as e:
             self.logger.error("Failed to load or parse embedded properties file %s: %s", file_name, e)
             messagebox.showerror("Configuration Error", f"Could not load or parse embedded properties file: {file_name}\n\nDetails: {e}")
             return {}
+            
+    def get_embedded_config_content(self, relative_path: str) -> Optional[str]:
+        normalized_key = relative_path.replace('\\', '/')
+        content = CONFIG_DATA.get(normalized_key)
+        if content is None:
+             base_name_key = os.path.basename(normalized_key)
+             content = CONFIG_DATA.get(base_name_key)
+             if content:
+                 self.logger.debug(f"Found embedded content using basename key: {base_name_key}")
+             else:
+                 self.logger.warning(f"Embedded config content not found for key '{normalized_key}' or basename '{base_name_key}'.")
+        else:
+             self.logger.debug(f"Found embedded content using key: {normalized_key}")
+        return content
+    
+    def get_factory_default_views(self) -> Dict[str, List[str]]:
+        self.logger.info("Loading factory default view definitions directly.")
+        
+        default_defs = self._load_json_from_file("parameter_definitions.json")
+        
+        if isinstance(default_defs, dict):
+             return default_defs
+        else:
+             self.logger.error("Factory default parameter_definitions.json is not a dict! Using empty config.")
+             return {}
