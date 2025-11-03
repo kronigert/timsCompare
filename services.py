@@ -1241,13 +1241,24 @@ class ReportGeneratorService:
             permname = param_config['permname'] 
             final_value = "" 
             
-            if permname == "calc_scan_mode": 
+            if permname == "calc_instrument_model":
+                val = dataset.instrument_model or "N/A"
+                final_value = "N/A" if val == "Unknown" else val
+            elif permname == "calc_tims_control_version":
+                final_value = dataset.tims_control_version or "N/A"
+            elif permname == "calc_last_modified_date":
+                val = dataset.last_modified_date or "N/A"
+                try:
+                    final_value = val.split('T')[0] if 'T' in val else val
+                except:
+                    final_value = val
+            elif permname == "calc_scan_mode": 
                 final_value = segment.workflow_name or "N/A" 
             elif permname == "calc_segment_start_time": 
                 final_value = f"{segment.start_time:.2f} min" 
             elif permname == "calc_segment_end_time": 
                 final_value = segment.end_time_display 
-            else: #
+            else: 
                 original_active_index = dataset.active_segment_index 
                 dataset.active_segment_index = segment_index 
                 raw_value = dataset.get_parameter_value(permname) 
@@ -1260,7 +1271,7 @@ class ReportGeneratorService:
                 "Value": final_value 
             }) 
 
-        return pd.DataFrame(report_data) 
+        return pd.DataFrame(report_data)
 
 
     def _generate_csv(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], file_path: str): 

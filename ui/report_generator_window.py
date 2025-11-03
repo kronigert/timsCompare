@@ -366,9 +366,10 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
         for p_config in self.current_params:
             grouped_params[p_config.get("category", "General")].append(p_config)
         def sort_key(g):
-            if g == "Mode": return (0, g)
-            if g == "Calculated Parameters": return (2, g)
-            return (1, g)
+            if g == "General": return (0, g)
+            if g == "Mode": return (1, g) 
+            if g == "Calculated Parameters": return (99, g) 
+            return (2, g)
         sorted_groups = sorted(grouped_params.keys(), key=sort_key)
 
         default_params_for_sorting = self.loader_service.get_default_parameters_for_dataset(self.dataset)
@@ -386,13 +387,31 @@ class ReportGeneratorWindow(ctk.CTkToplevel):
                 param_label = p_config.get('label', p_config['permname'])
                 is_enabled = self.param_enabled_vars.get(param_key, tk.BooleanVar(value=True)).get()
                 image = self.checked_img if is_enabled else self.unchecked_img
+                
+                permname = p_config['permname']
                 values = []
-                for i in range(len(self.dataset.segments)):
-                    original_index = self.dataset.active_segment_index
-                    self.dataset.active_segment_index = i
-                    raw_val = self.dataset.get_parameter_value(p_config['permname'])
-                    values.append(format_parameter_value(raw_val, p_config))
-                    self.dataset.active_segment_index = original_index
+
+                if permname == "calc_instrument_model":
+                    val = self.dataset.instrument_model or "N/A"
+                    if val == "Unknown": val = "N/A"
+                    values = [val] * len(self.dataset.segments)
+                elif permname == "calc_tims_control_version":
+                    val = self.dataset.tims_control_version or "N/A"
+                    values = [val] * len(self.dataset.segments)
+                elif permname == "calc_last_modified_date":
+                    val = self.dataset.last_modified_date or "N/A"
+                    try:
+                        formatted_val = val.split('T')[0] if 'T' in val else val
+                    except:
+                        formatted_val = val
+                    values = [formatted_val] * len(self.dataset.segments)
+                else:
+                    for i in range(len(self.dataset.segments)):
+                        original_index = self.dataset.active_segment_index
+                        self.dataset.active_segment_index = i
+                        raw_val = self.dataset.get_parameter_value(p_config['permname'])
+                        values.append(format_parameter_value(raw_val, p_config))
+                        self.dataset.active_segment_index = original_index
                 
                 display_values = tuple(values) if self.is_multisegment else (values[0],)
                 
