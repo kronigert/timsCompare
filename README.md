@@ -6,7 +6,7 @@
 
 A desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
 
-<img width="1920" height="1032" alt="Method_Comparison" src="https://github.com/user-attachments/assets/f34704e9-850a-4619-9179-c17e8eadc1e9" />
+<img width="1918" height="1028" alt="Method_Comparison" src="https://github.com/user-attachments/assets/6e0a8091-bf04-4a2f-a876-1d1b1a8ef655" />
 
 ---
 
@@ -20,9 +20,11 @@ The application can handle various acquisition modes, including PASEF, dia-PASEF
 
 * **Side-by-Side Comparison:** Load multiple methods and compare their parameters in a clear, tabular format that highlights differences.
 * **Multi-Segment Analysis:** Automatically parses and displays methods with multiple segments.
-* **Graphical Visualization:** Generates plots of isolation schemes for PASEF, dia-PASEF, and diagonal-PASEF methods.
+* **Graphical Visualization:** Generates plots of isolation schemes for PASEF, dia-PASEF, and diagonal-PASEF methods. Plots feature an **axis toggle** to switch between autofitting the windows and viewing the full scan range (m/z and 1/K0) defined in the method.
 * **Method Reports:** Export detailed, multi-page PDF or CSV reports with a clean two-column layout for documentation or publications.
 * **Data Export:** Export scan window tables (e.g., dia-PASEF windows, diagonal-PASEF, PASEF polygons) to text files. Exported dia-PASEF and diagonal-PASEF windows can be directly imported into timsControl.
+* **Customizable Default View:** Configure and save your preferred default parameters for each specific acquisition mode (e.g., "General", "dia-PASEF", etc) via the "Manage Views" window.
+* **View Management:** Temporarily add extra parameters with the "Add Parameters" dialog, or instantly revert to your customized layout with the "Reset View" button.
 
 ---
 
@@ -66,7 +68,7 @@ After loading your data, you can add more parameters to the comparison table:
 4.  In the report dialog, customize the parameters and segments you wish to include.
 5.  Choose your export format (PDF or CSV) and click "Generate Report".
 
-<img width="666" height="938" alt="Method_Report" src="https://github.com/user-attachments/assets/83fb7067-5700-4294-ac1e-0f6aafdfc288" />
+<img width="607" height="857" alt="Method_Report" src="https://github.com/user-attachments/assets/c025e4d0-5fd3-4e35-98a8-91f2b7017ce4" />
 
 ### Exporting Scan Windows
 
@@ -77,6 +79,17 @@ This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and a
 3.  Click the **Export** button and select **Windows** from the menu.
 4.  A save dialog will open, allowing you to choose a location and name for the exported `.txt` file.
 5. Exported diagonal-PASEF and dia-PASEF windows can directly be imported into timsControl. For PASEF methods, the polygon has to be created manually in timsControl using the x,y coordinates from the exported .txt
+
+### Customizing the Default View
+
+You can change the default set of parameters that are loaded for each scan mode:
+
+1.  Click the **Manage Views** button in the top toolbar.
+2.  In the new window, select the **Scan Mode** (e.g., "General", "dia-PASEF") you wish to edit.
+3.  Use the **Group** and **Search** filters to find parameters in the "Available Parameters" list.
+4.  Use the `>` and `<` buttons (or double-click) to move parameters to the "Default View Parameters" list.
+5.  Reorder the parameters in the right-hand list using **drag-and-drop** or the **Up/Down** buttons.
+6.  Click **Save Changes**. The application will now use this new layout as the default for that scan mode (a restart may be required).
 
 ---
 ## Disclaimer
