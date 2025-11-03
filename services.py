@@ -582,12 +582,13 @@ class DataLoaderService:
             instrument_scope = dataset.xml_root.find('instrument') if dataset.xml_root else None
             
             values = self._parse_parameters_for_scope(
-                method_scope_element=active_segment.xml_scope_element,
+                param_scope_element=active_segment.xml_scope_element, 
                 instrument_scope_element=instrument_scope,
                 param_info=[param_config],
                 ion_polarity=active_segment.ion_polarity,
                 ion_source=ion_source
             )
+            
             return values.get(permname)
         except (IndexError, StopIteration) as e:
             self.logger.warning(f"Could not get parameter value for source '{ion_source}': {e}")
