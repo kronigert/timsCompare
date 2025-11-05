@@ -9,12 +9,15 @@ from PIL import Image, ImageTk
 import sys
 import ctypes
 
-log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(log_formatter)
 early_logger = logging.getLogger()
 early_logger.addHandler(console_handler)
 early_logger.setLevel(logging.DEBUG)
+
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 early_logger.info(">>> main.py: Starting execution <<<")
 

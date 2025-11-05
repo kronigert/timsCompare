@@ -117,7 +117,7 @@ class AboutDialog(ctk.CTkToplevel):
         
         title_label = ctk.CTkLabel( 
             top_frame, 
-            text="timsCompare v1.1", 
+            text="timsCompare v1.2", 
             font=ctk.CTkFont(size=22, weight="bold"), 
             text_color="#E4EFF7" 
         ) 
@@ -150,17 +150,25 @@ class AboutDialog(ctk.CTkToplevel):
         
         libs_label = ctk.CTkLabel( 
             main_frame, 
-            text="Built with: Python, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, tkinterdnd2, fontTools, defusedxml", 
+            text="Built with: Python®, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, tkinterdnd2, fontTools, defusedxml", 
             font=ctk.CTkFont(size=11), 
             text_color="gray60" 
         ) 
-        libs_label.grid(row=2, column=0, padx=20, pady=(10, 15)) 
+        libs_label.grid(row=2, column=0, padx=20, pady=(10, 5), sticky="ew") 
+
+        trademark_label = ctk.CTkLabel(
+            main_frame,
+            text="'Python' is a registered trademark of the Python Software Foundation.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray60"
+        )
+        trademark_label.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
 
         separator = ctk.CTkFrame(main_frame, height=1, fg_color="#1A5680") 
-        separator.grid(row=3, column=0, padx=20, pady=5, sticky="ew") 
+        separator.grid(row=4, column=0, padx=20, pady=5, sticky="ew") 
 
         footer_frame = ctk.CTkFrame(main_frame, fg_color="transparent") 
-        footer_frame.grid(row=4, column=0, padx=20, pady=10, sticky="ew") 
+        footer_frame.grid(row=5, column=0, padx=20, pady=10, sticky="ew") 
         footer_frame.grid_columnconfigure((0, 2), weight=1)
 
         button_container = ctk.CTkFrame(footer_frame, fg_color="transparent")
@@ -233,9 +241,6 @@ class AboutDialog(ctk.CTkToplevel):
 
             for lib_name in sorted(licenses.keys()):
                 info = licenses[lib_name]
-                full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
-                full_text += f"{info.get('text', 'No license text found.')}\n\n"
-                full_text += "=" * 70 + "\n\n"
                 full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
                 full_text += f"{info.get('text', 'No license text found.')}\n\n"
                 full_text += "=" * 70 + "\n\n"
@@ -1162,27 +1167,72 @@ class timsCompareApp:
             elif r['Type'] == 1: lines.append(f"PASEF,{int(r['CycleId'])},{r['OneOverK0Start']:.4f},{r['OneOverK0End']:.4f},{r['StartMass']:.2f},{r['EndMass']:.2f},-") 
         return "\n".join(lines) 
 
-    def _convert_diagonal_spec_to_parameters(self, diag_params: Dict, seg_params: Dict) -> str: 
-        if not diag_params: return "" 
-        p = diag_params 
+    def _convert_diagonal_spec_to_parameters(self, diag_params: Any, seg_params: Dict) -> str: 
+        if diag_params is None: return "" 
+        
         try: start_im, end_im = float(seg_params.get("calc_im_start", 0)), float(seg_params.get("calc_im_end", 0)) 
         except (ValueError, TypeError): start_im, end_im = 0.0, 0.0 
+        
         lines = ["type, mobility pos.1 [1/K0], mass pos.1 start [m/z], mass pos.1 end [m/z], mobility pos.2 [1/K0], mass pos.2 start [m/z]"] 
-        for _ in range(int(p.get('insert_ms_scan', 0))): lines.append("ms,-,-,-,-,-") 
-        if p.get('slope', 0) == 0: return "" 
-        num, iso_mz = int(p.get('number_of_slices', 0)), p.get('isolation_mz', 0.0) 
-        c_mz1, c_mz2 = (start_im - p['origin']) / p['slope'], (end_im - p['origin']) / p['slope'] 
-        p_start1, p_start2 = c_mz1 - (p['width_mz'] / 2), c_mz2 - (p['width_mz'] / 2) 
-        step = p['width_mz'] / num if num > 0 else 0 
-        for i in range(num): 
-            m1_start, m2_start = p_start1 + i * step, p_start2 + i * step 
-            lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_start + iso_mz:.2f},{end_im:.2f},{m2_start:.2f}") 
-        return "\n".join(lines) 
 
-    def _convert_pasef_polygon_to_text(self, polygon_data: tuple) -> str: 
+        if isinstance(diag_params, pd.DataFrame):
+            if diag_params.empty: return ""
+            
+            for row in diag_params.itertuples():
+                if row.type == 0:
+                     lines.append("ms,-,-,-,-,-") 
+                else:
+                    if row.slope == 0: continue
+                    
+                    half_width = row.isolation_mz / 2
+                    
+                    center_m1 = (start_im - row.origin) / row.slope
+                    m1_start = center_m1 - half_width
+                    m1_end = center_m1 + half_width
+                    
+                    center_m2 = (end_im - row.origin) / row.slope
+                    m2_start = center_m2 - half_width
+                    
+                    lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_end:.2f},{end_im:.2f},{m2_start:.2f}")
+
+        elif isinstance(diag_params, dict):
+            p = diag_params
+            for _ in range(int(p.get('insert_ms_scan', 0))): lines.append("ms,-,-,-,-,-") 
+            
+            if p.get('slope', 0) == 0: return "" 
+            num, iso_mz = int(p.get('number_of_slices', 0)), p.get('isolation_mz', 0.0) 
+            half_iso_width = iso_mz / 2
+            
+            center_m1_first = (start_im - p['origin']) / p['slope'] 
+            center_m2_first = (end_im - p['origin']) / p['slope'] 
+            
+            step = p['width_mz'] / num if num > 0 else 0 
+            
+            for i in range(num): 
+                center_m1 = center_m1_first + (i * step)
+                m1_start = center_m1 - half_iso_width
+                m1_end = center_m1 + half_iso_width
+                
+                center_m2 = center_m2_first + (i * step)
+                m2_start = center_m2 - half_iso_width
+
+                lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_end:.2f},{end_im:.2f},{m2_start:.2f}") 
+        
+        return "\n".join(lines)
+
+    def _convert_pasef_polygon_to_text(self, polygon_data: Any) -> str: 
         if not polygon_data: return "" 
-        mass, mobility = polygon_data 
-        return "Mass [m/z],Mobility [1/K0]\n" + "\n".join(f"{m:.4f},{im:.4f}" for m, im in zip(mass, mobility)) 
+        
+        polygon_list = polygon_data
+        
+        lines = ["Polygon_ID,Mass [m/z],Mobility [1/K0]"]
+        for i, polygon_points in enumerate(polygon_list):
+            if not polygon_points:
+                continue
+            for (m, im) in polygon_points:
+                lines.append(f"{i},{m:.4f},{im:.4f}")
+        
+        return "\n".join(lines)
 
     def _show_add_menu(self): 
         self.add_menu.tk_popup(self.add_menu_button.winfo_rootx(), self.add_menu_button.winfo_rooty() + self.add_menu_button.winfo_height()) 

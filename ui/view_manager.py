@@ -23,31 +23,45 @@ class ViewManager(ctk.CTkToplevel):
         self.loader_service = loader_service
 
         self.current_view_definitions = copy.deepcopy(self.config.parameter_definitions)
-        self.all_params_list = self.config.all_definitions
+        
+        all_definitions = self.config.all_definitions
+        self.all_params_list = [
+            p for p in all_definitions 
+            if p.get("location") not in ["volatile", "nvram"]
+        ]
+
+        self.calc_param_details_map = {
+            "calc_instrument_model": {"label": "Instrument Model", "category": "General"},
+            "calc_tims_control_version": {"label": "timsControl Version", "category": "General"},
+            "calc_last_modified_date": {"label": "Last Modified", "category": "General"},
+            "calc_segment_start_time": {"label": "Segment Start", "category": "Mode"},
+            "calc_segment_end_time": {"label": "Segment End", "category": "Mode"},
+            "calc_scan_mode": {"label": "Scan Mode", "category": "Mode"},
+            "calc_cycle_time": {"label": "Cycle Time", "category": "Calculated Parameters"},
+            "calc_scan_area_mz": {"label": "Window Scan Area", "category": "Calculated Parameters"},
+            "calc_ramps": {"label": "Ramps per Cycle", "category": "Calculated Parameters"},
+            "calc_ms1_scans": {"label": "MS1 Scans per Cycle", "category": "Calculated Parameters"},
+            "calc_steps": {"label": "Isolation Steps per Cycle", "category": "Calculated Parameters"},
+            "calc_mz_width": {"label": "Isolation Window Width", "category": "Calculated Parameters"},
+            "calc_ce_ramping_start": {"label": "CE Ramping Start", "category": "Calculated Parameters"},
+            "calc_ce_ramping_end": {"label": "CE Ramping End", "category": "Calculated Parameters"},
+            "calc_msms_stepping_display_list": {"label": "MS/MS Stepping Details", "category": "TIMS"},
+            "calc_advanced_ce_ramping_display_list": {"label": "Advanced CE Ramping", "category": "TIMS"}
+        }
+        
+        for permname, details in self.calc_param_details_map.items():
+            self.all_params_list.append({
+                "permname": permname,
+                "label": details["label"],
+                "category": details["category"]
+            })
+            
+
         self.available_workflows = sorted([wf for wf in self.current_view_definitions.keys() if wf != "__GENERAL__"])
 
         self.workflow_display_map = {"General": "__GENERAL__"}
         self.workflow_display_map.update({wf: wf for wf in self.available_workflows})
         self.workflow_display_names = ["General"] + self.available_workflows
-
-        self.calc_param_details_map = {
-            "calc_instrument_model": "Instrument Model",
-            "calc_tims_control_version": "timsControl Version",
-            "calc_last_modified_date": "Last Modified",
-            "calc_segment_start_time": "Segment Start",
-            "calc_segment_end_time": "Segment End",
-            "calc_scan_mode": "Scan Mode",
-            "calc_cycle_time": "Cycle Time",
-            "calc_scan_area_mz": "Window Scan Area",
-            "calc_ramps": "Ramps per Cycle",
-            "calc_ms1_scans": "MS1 Scans per Cycle",
-            "calc_steps": "Isolation Steps per Cycle",
-            "calc_mz_width": "Isolation Window Width",
-            "calc_ce_ramping_start": "CE Ramping Start",
-            "calc_ce_ramping_end": "CE Ramping End",
-            "calc_msms_stepping_display_list": "MS/MS Stepping Details",
-            "calc_advanced_ce_ramping_display_list": "Advanced CE Ramping"
-        }
 
         self.selected_workflow_display_var = ctk.StringVar(value="General") 
 
@@ -278,7 +292,7 @@ class ViewManager(ctk.CTkToplevel):
     def _get_param_display_name(self, permname: str) -> str:
         
         if permname in self.calc_param_details_map:
-            label = self.calc_param_details_map[permname]
+            label = self.calc_param_details_map[permname]["label"]
             return f"{label} [{permname}]"
 
         param_def = next((p for p in self.all_params_list if p.get('permname') == permname), None)

@@ -17,6 +17,7 @@ import matplotlib.patches as patches
 from PIL import Image
 import customtkinter as ctk
 from typing import Optional, Any, List, Dict, Tuple, Callable
+from collections import defaultdict
 from fpdf import FPDF
 import tempfile
 
@@ -716,17 +717,29 @@ class DataLoaderService:
     def _process_pasef_data(self, segment: Segment): 
         mass_values_str = segment.parameters.get("IMS_PolygonFilter_Mass") 
         mobility_values_str = segment.parameters.get("IMS_PolygonFilter_Mobility") 
+        id_values_str = segment.parameters.get("IMS_PolygonFilter_Id")
         
         segment.pasef_polygon_data = None 
 
-        if mass_values_str is not None and mobility_values_str is not None: 
+        if mass_values_str is not None and mobility_values_str is not None and id_values_str is not None: 
             try: 
                 mass_values = [float(v) for v in mass_values_str if v is not None] 
                 mobility_values = [float(v) for v in mobility_values_str if v is not None] 
-                if mass_values and mobility_values: 
-                    segment.pasef_polygon_data = (mass_values, mobility_values) 
-            except (TypeError, ValueError): 
-                segment.pasef_polygon_data = None 
+                id_values = [int(v) for v in id_values_str if v is not None]
+
+                if not (len(mass_values) == len(mobility_values) == len(id_values)):
+                    self.logger.warning("PASEF polygon coordinate lists (Mass, Mobility, Id) have mismatching lengths. Skipping plot.")
+                    return
+
+                polygons = defaultdict(list)
+                for mz, im, poly_id in zip(mass_values, mobility_values, id_values):
+                    polygons[poly_id].append((mz, im))
+                
+                segment.pasef_polygon_data = [polygons[key] for key in sorted(polygons.keys())]
+
+            except (TypeError, ValueError) as e: 
+                self.logger.error(f"Error parsing PASEF polygon data: {e}")
+                segment.pasef_polygon_data = None
         
         try: 
             num_ramps = int(segment.parameters.get("MSMS_Pasef_NumRampsPerCycle") or 0) 
@@ -736,7 +749,7 @@ class DataLoaderService:
             cycle_time_s = total_scans * (ramp_time + quench_time) / 1000 
             segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s" 
         except (ValueError, TypeError): 
-            segment.parameters["calc_cycle_time"] = "N/A" 
+            segment.parameters["calc_cycle_time"] = "N/A"
             
     def _process_dia_pasef_data(self, segment: Segment, search_path: str): 
         sqlite_file = self._find_file(search_path, ["diasettings.diasqlite"]) 
@@ -813,11 +826,101 @@ class DataLoaderService:
     def _process_diagonal_pasef_data(self, segment: Segment, search_path: str): 
         sqlite_file = self._find_file(search_path, ["synchroSettings.syncsqlite"]) 
         if not sqlite_file: return 
+        
+        diag_df = pd.DataFrame()
+        table_found = None
+        conn = None
+        
         try: 
             conn = sqlite3.connect(f'file:{sqlite_file}?mode=ro', uri=True) 
-            diag_df = pd.read_sql_query("SELECT * FROM Template", conn) 
+            
+            try:
+                diag_df = pd.read_sql_query("SELECT * FROM Slices", conn)
+                if not diag_df.empty:
+                    table_found = "Slices"
+                    self.logger.debug("Found and loaded 'Slices' table.")
+            except Exception:
+                self.logger.debug("'Slices' table not found, trying 'Template' table.")
+            
+            if table_found is None:
+                try:
+                    diag_df = pd.read_sql_query("SELECT * FROM Template", conn)
+                    if not diag_df.empty:
+                        table_found = "Template"
+                        self.logger.debug("Found and loaded 'Template' table.")
+                except Exception: 
+                    self.logger.debug("'Template' table also not found.")
+            
             conn.close() 
-            if not diag_df.empty: 
+            conn = None
+
+            if table_found is None or diag_df.empty:
+                self.logger.debug("No 'Slices' or 'Template' table found in synchroSettings.syncsqlite.")
+                return
+
+            start_im, end_im = None, None 
+            try: 
+                start_im = float(segment.parameters.get("IMS_imeX_RampStart")) 
+                end_im = float(segment.parameters.get("IMS_imeX_RampEnd")) 
+                segment.parameters["calc_scan_area_im"] = f"{start_im:.2f} - {end_im:.2f}" 
+                segment.parameters["calc_im_start"], segment.parameters["calc_im_end"] = start_im, end_im 
+            except (ValueError, TypeError, AttributeError): 
+                segment.parameters["calc_scan_area_im"] = "N/A" 
+
+            if table_found == "Slices":
+                segment.diagonal_pasef_data = diag_df
+                
+                ms1_scans_df = diag_df[diag_df['type'] == 0]
+                pasef_slices_df = diag_df[diag_df['type'] != 0].copy() 
+                
+                ms1_scans = int(len(ms1_scans_df))
+                num_ramps = int(len(pasef_slices_df))
+
+                segment.parameters["calc_ms1_scans"] = ms1_scans 
+                segment.parameters["calc_ramps"] = num_ramps 
+
+                unique_widths = pasef_slices_df['isolation_mz'].nunique()
+                if unique_widths == 0:
+                     segment.parameters["calc_mz_width"] = "N/A"
+                elif unique_widths == 1:
+                     segment.parameters["calc_mz_width"] = f"static ({pasef_slices_df['isolation_mz'].iloc[0]:.1f})"
+                else:
+                     segment.parameters["calc_mz_width"] = "variable"
+                
+                if start_im is not None and end_im is not None and not pasef_slices_df.empty:
+                    try:
+                        all_mz_starts = []
+                        all_mz_ends = []
+                        for row in pasef_slices_df.itertuples():
+                            if row.slope == 0: continue
+                            
+                            half_width = row.isolation_mz / 2
+                            
+                            center_mz_bottom = (start_im - row.origin) / row.slope
+                            start_mz_bottom = center_mz_bottom - half_width
+                            end_mz_bottom = center_mz_bottom + half_width
+                            
+                            center_mz_top = (end_im - row.origin) / row.slope
+                            start_mz_top = center_mz_top - half_width
+                            end_mz_top = center_mz_top + half_width
+                            
+                            all_mz_starts.extend([start_mz_bottom, start_mz_top])
+                            all_mz_ends.extend([end_mz_bottom, end_mz_top])
+
+                        if all_mz_starts and all_mz_ends:
+                            min_mz = min(all_mz_starts)
+                            max_mz = max(all_mz_ends)
+                            segment.parameters["calc_scan_area_mz"] = f"{min_mz:.2f} m/z - {max_mz:.2f} m/z"
+                        else:
+                            segment.parameters["calc_scan_area_mz"] = "N/A"
+                            
+                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
+                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z from 'Slices': %s", e) 
+                        segment.parameters["calc_scan_area_mz"] = "N/A"
+                else:
+                    segment.parameters["calc_scan_area_mz"] = "N/A"
+
+            elif table_found == "Template":
                 p = diag_df.iloc[0].to_dict() 
                 segment.diagonal_pasef_data = p 
                 ms1_scans = int(p.get('insert_ms_scan', 0)) 
@@ -826,43 +929,59 @@ class DataLoaderService:
                 segment.parameters["calc_ms1_scans"] = ms1_scans 
                 segment.parameters["calc_ramps"] = num_ramps 
                 segment.parameters["calc_mz_width"] = f"{isolation_mz:.1f}" 
-                start_im, end_im = None, None 
-                try: 
-                    start_im = float(segment.parameters.get("IMS_imeX_RampStart")) 
-                    end_im = float(segment.parameters.get("IMS_imeX_RampEnd")) 
-                    segment.parameters["calc_scan_area_im"] = f"{start_im:.2f} - {end_im:.2f}" 
-                    segment.parameters["calc_im_start"], segment.parameters["calc_im_end"] = start_im, end_im 
-                except (ValueError, TypeError, AttributeError): 
-                    segment.parameters["calc_scan_area_im"] = "N/A" 
+                        
                 if start_im is not None and end_im is not None: 
                     try: 
                         if p.get('slope') is None or p.get('origin') is None or p.get('width_mz') is None: 
                             raise ValueError("Missing required diagonal-PASEF parameters (slope, origin, or width_mz).") 
                         if p['slope'] == 0: raise ZeroDivisionError("Slope cannot be zero.") 
                         
-                        center_mz1 = (start_im - p['origin']) / p['slope'] 
-                        center_mz2 = (end_im - p['origin']) / p['slope'] 
-                        pattern_start1 = center_mz1 - (p['width_mz'] / 2) 
-                        pattern_start2 = center_mz2 - (p['width_mz'] / 2) 
-                        step = p['width_mz'] / num_ramps if num_ramps > 0 else 0 
-                        mz_start_first_slice = pattern_start1 
-                        mz_start_last_slice = pattern_start2 + ((num_ramps - 1) * step) 
-                        mz_end_last_slice = mz_start_last_slice + isolation_mz 
-                        segment.parameters["calc_scan_area_mz"] = f"{mz_start_first_slice:.2f} m/z - {mz_end_last_slice:.2f} m/z" 
-                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
-                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z: %s", e) 
-                        segment.parameters["calc_scan_area_mz"] = "N/A"     
+                        half_iso_width = isolation_mz / 2
+                        step_mz = p['width_mz'] / num_ramps if num_ramps > 0 else 0 
+
+                        center_mz1_first = (start_im - p['origin']) / p['slope'] 
+                        center_mz2_first = (end_im - p['origin']) / p['slope'] 
                         
-                try: 
-                    ramp_time_ms = float(segment.parameters.get("IMS_imeX_RampTime") or 0) 
-                    quench_time = float(segment.parameters.get("Collision_QuenchTime_Set") or 0) 
-                    total_scans = ms1_scans + num_ramps 
+                        start_mz1_first = center_mz1_first - half_iso_width
+                        end_mz1_first = center_mz1_first + half_iso_width
+                        start_mz2_first = center_mz2_first - half_iso_width
+                        end_mz2_first = center_mz2_first + half_iso_width
+
+                        center_mz1_last = center_mz1_first + ((num_ramps - 1) * step_mz)
+                        center_mz2_last = center_mz2_first + ((num_ramps - 1) * step_mz)
+
+                        start_mz1_last = center_mz1_last - half_iso_width
+                        end_mz1_last = center_mz1_last + half_iso_width
+                        start_mz2_last = center_mz2_last - half_iso_width
+                        end_mz2_last = center_mz2_last + half_iso_width
+
+                        min_mz = min(start_mz1_first, start_mz2_first, start_mz1_last, start_mz2_last)
+                        max_mz = max(end_mz1_first, end_mz2_first, end_mz1_last, end_mz2_last)
+
+                        segment.parameters["calc_scan_area_mz"] = f"{min_mz:.2f} m/z - {max_mz:.2f} m/z" 
+                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
+                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z from 'Template': %s", e) 
+                        segment.parameters["calc_scan_area_mz"] = "N/A"     
+                else:
+                    segment.parameters["calc_scan_area_mz"] = "N/A"
+            
+            try: 
+                ramp_time_ms = float(segment.parameters.get("IMS_imeX_RampTime") or 0) 
+                quench_time = float(segment.parameters.get("Collision_QuenchTime_Set") or 0) 
+                total_scans = segment.parameters.get("calc_ms1_scans", 0) + segment.parameters.get("calc_ramps", 0)
+                if total_scans > 0:
                     cycle_time_s = total_scans * (ramp_time_ms + quench_time) / 1000 
-                    segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s" 
-                except (ValueError, TypeError, AttributeError): 
-                    segment.parameters["calc_cycle_time"] = "N/A" 
+                    segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s"
+                else:
+                    segment.parameters["calc_cycle_time"] = "N/A"
+            except (ValueError, TypeError, AttributeError): 
+                segment.parameters["calc_cycle_time"] = "N/A" 
+
         except Exception as e: 
-            self.logger.debug("Failed to process diagonal-PASEF data: %s", e) 
+            self.logger.debug("Failed to process diagonal-PASEF data: %s", e)
+        finally:
+            if conn:
+                conn.close()
     
     def _find_file(self, start_folder: str, file_patterns: List[str]) -> Optional[str]: 
         for root, _, files in os.walk(start_folder): 
@@ -894,7 +1013,7 @@ class DataLoaderService:
             all_params_to_check = dataset.default_params + additional_params_info 
             
             new_values = self._parse_parameters_for_scope( 
-                method_scope_element=segment.xml_scope_element, 
+                param_scope_element=segment.xml_scope_element, 
                 instrument_scope_element=instrument_scope_element, 
                 param_info=all_params_to_check, 
                 ion_polarity=polarity_string,
@@ -1065,31 +1184,83 @@ class PlottingService:
         return fig, ax 
 
     def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
-        p = segment.diagonal_pasef_data 
-        if p is None: return None 
-        slope, origin = p['slope'], p['origin'] 
-        total_pattern_width_mz, slice_isolation_width_mz = p['width_mz'], p['isolation_mz'] 
-        num_slices = int(p['number_of_slices']) 
+        plot_data = segment.diagonal_pasef_data 
+        if plot_data is None: return None 
+        
         measured_mobility_start = segment.parameters.get("calc_im_start") 
         measured_mobility_end = segment.parameters.get("calc_im_end") 
         if measured_mobility_start is None or measured_mobility_end is None: return None 
-        if slope == 0: return None 
+
         fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
-        colors = plt.cm.viridis_r(np.linspace(0, 1, num_slices)) 
-        center_mz1, center_mz2 = (measured_mobility_start - origin) / slope, (measured_mobility_end - origin) / slope 
-        pattern_start1, pattern_start2 = center_mz1 - (total_pattern_width_mz / 2), center_mz2 - (total_pattern_width_mz / 2) 
-        step_mz = total_pattern_width_mz / num_slices if num_slices > 0 else 0 
-        for i in range(num_slices): 
-            slice_start_mz_bottom = pattern_start1 + (i * step_mz) 
-            slice_start_mz_top = pattern_start2 + (i * step_mz) 
-            slice_end_mz_bottom = slice_start_mz_bottom + slice_isolation_width_mz 
-            slice_end_mz_top = slice_start_mz_top + slice_isolation_width_mz 
-            vertices = [ 
-                (slice_start_mz_bottom, measured_mobility_start), (slice_end_mz_bottom,   measured_mobility_start), 
-                (slice_end_mz_top,      measured_mobility_end), (slice_start_mz_top,    measured_mobility_end) 
-            ] 
-            polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
-            ax.add_patch(polygon) 
+        
+        if isinstance(plot_data, pd.DataFrame):
+            pasef_slices_df = plot_data[plot_data['type'] != 0].copy()
+            if pasef_slices_df.empty:
+                plt.close(fig)
+                return None
+                
+            num_slices = len(pasef_slices_df)
+            colors = plt.cm.viridis_r(np.linspace(0, 1, num_slices)) 
+
+            for i, row in enumerate(pasef_slices_df.itertuples()):
+                if row.slope == 0: continue
+                
+                half_width = row.isolation_mz / 2
+                
+                center_mz_bottom = (measured_mobility_start - row.origin) / row.slope
+                slice_start_mz_bottom = center_mz_bottom - half_width
+                slice_end_mz_bottom = center_mz_bottom + half_width
+                
+                center_mz_top = (measured_mobility_end - row.origin) / row.slope
+                slice_start_mz_top = center_mz_top - half_width
+                slice_end_mz_top = center_mz_top + half_width
+                
+                vertices = [ 
+                    (slice_start_mz_bottom, measured_mobility_start), 
+                    (slice_end_mz_bottom,   measured_mobility_start), 
+                    (slice_end_mz_top,      measured_mobility_end), 
+                    (slice_start_mz_top,    measured_mobility_end) 
+                ] 
+                polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
+                ax.add_patch(polygon) 
+
+        elif isinstance(plot_data, dict):
+            p = plot_data
+            slope, origin = p['slope'], p['origin'] 
+            total_pattern_width_mz, slice_isolation_width_mz = p['width_mz'], p['isolation_mz'] 
+            num_slices = int(p['number_of_slices']) 
+            
+            if slope == 0:
+                plt.close(fig)
+                return None 
+            
+            colors = plt.cm.viridis_r(np.linspace(0, 1, num_slices)) 
+            half_iso_width = slice_isolation_width_mz / 2
+            
+            center_mz1_first = (measured_mobility_start - origin) / slope 
+            center_mz2_first = (measured_mobility_end - origin) / slope 
+            
+            step_mz = total_pattern_width_mz / num_slices if num_slices > 0 else 0 
+            
+            for i in range(num_slices): 
+                center_mz_bottom = center_mz1_first + (i * step_mz)
+                center_mz_top = center_mz2_first + (i * step_mz)
+                
+                slice_start_mz_bottom = center_mz_bottom - half_iso_width
+                slice_start_mz_top = center_mz_top - half_iso_width
+                slice_end_mz_bottom = center_mz_bottom + half_iso_width
+                slice_end_mz_top = center_mz_top + half_iso_width
+                
+                vertices = [ 
+                    (slice_start_mz_bottom, measured_mobility_start), (slice_end_mz_bottom,   measured_mobility_start), 
+                    (slice_end_mz_top,      measured_mobility_end), (slice_start_mz_top,    measured_mobility_end) 
+                ] 
+                polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
+                ax.add_patch(polygon)
+        else:
+            plt.close(fig) 
+            return None
+        
         if autofit:
             ax.autoscale_view()
         elif mz_range and k0_range:
@@ -1103,20 +1274,32 @@ class PlottingService:
                 ax.autoscale_view() 
         else:
             ax.autoscale_view() 
-        xlim, ylim = ax.get_xlim(), ax.get_ylim() 
-        x_buffer, y_buffer = (xlim[1] - xlim[0]) * 0.05, (ylim[1] - ylim[0]) * 0.05 
-        ax.set_xlim(xlim[0] - x_buffer, xlim[1] + x_buffer) 
-        ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer) 
-        return fig, ax 
+        
+        if autofit:
+            xlim, ylim = ax.get_xlim(), ax.get_ylim() 
+            x_buffer, y_buffer = (xlim[1] - xlim[0]) * 0.05, (ylim[1] - ylim[0]) * 0.05 
+            ax.set_xlim(xlim[0] - x_buffer, xlim[1] + x_buffer) 
+            ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer) 
+        
+        return fig, ax
 
     def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
         if not segment.pasef_polygon_data: return None 
-        mass_coords, mobility_coords = segment.pasef_polygon_data 
-        if not mass_coords or not mobility_coords or len(mass_coords) != len(mobility_coords): return None 
-        polygon_points = list(zip(mass_coords, mobility_coords)) 
+        
+        polygon_list = segment.pasef_polygon_data 
+        if not polygon_list or not all(polygon_list):
+             self.logger.warning("PASEF polygon data is empty or invalid. Skipping plot.")
+             return None
+
         fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
-        polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7) 
-        ax.add_patch(polygon) 
+        
+        for polygon_points in polygon_list:
+            if polygon_points and len(polygon_points) > 2:
+                polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7) 
+                ax.add_patch(polygon) 
+            else:
+                self.logger.debug(f"Skipping invalid polygon with {len(polygon_points)} points.")
+        
         if autofit:
             ax.autoscale_view()
         elif mz_range and k0_range:
@@ -1130,7 +1313,7 @@ class PlottingService:
                 ax.autoscale_view() 
         else:
             ax.autoscale_view() 
-        return fig, ax 
+        return fig, ax
 
     def generate_plot_as_svg_buffer(self, dataset: Dataset, width_in: float, height_in: float, bg_color: str = "white", show_filename: bool = True) -> Optional[io.BytesIO]: 
         try: 
