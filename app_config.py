@@ -14,6 +14,32 @@ from _config_data import CONFIG_DATA
 USER_CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.timsCompare')
 USER_VIEW_DEFINITIONS_FILENAME = "user_view_definitions.json"
 
+CALCULATED_PARAMETERS = {
+    "calc_instrument_model": {"label": "Instrument Model", "category": "General"},
+    "calc_tims_control_version": {"label": "timsControl Version", "category": "General"},
+    "calc_last_modified_date": {"label": "Last Modified", "category": "General"},
+    "calc_scan_mode": {"label": "Scan Mode", "category": "Mode"},
+    "calc_segment_start_time": {"label": "Segment Start", "category": "Mode"},
+    "calc_segment_end_time": {"label": "Segment End", "category": "Mode"},
+    "calc_scan_area_mz": {"label": "Window Scan Area", "category": "Calculated Parameters"},
+    "calc_ramps": {"label": "Ramps per Cycle", "category": "Calculated Parameters"},
+    "calc_ms1_scans": {"label": "MS1 Scans per Cycle", "category": "Calculated Parameters"},
+    "calc_steps": {"label": "Isolation Steps per Cycle", "category": "Calculated Parameters"},
+    "calc_mz_width": {"label": "Isolation Window Width", "category": "Calculated Parameters"},
+    "calc_ce_ramping_start": {"label": "CE Ramping Start", "category": "Energy Ramping"},
+    "calc_ce_ramping_end": {"label": "CE Ramping End", "category": "Energy Ramping"},
+    "calc_cycle_time": {"label": "Cycle Time", "category": "Calculated Parameters"},
+    "calc_msms_stepping_display_list": {"label": "MS/MS Stepping Details", "category": "TIMS"},
+    "calc_advanced_ce_ramping_display_list": {"label": "Advanced CE Ramping", "category": "TIMS"},
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_Set": {"label": "Storage Time Ramping - MS", "category": "Focus Pre TOF"},
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_MSMS_Set": {"label": "Storage Time Ramping - MS/MS", "category": "Focus Pre TOF"},
+    "calc_aip_lens1_profile_ms_display_list": {"label": "Lens Profile - MS", "category": "Focus Pre TOF"},
+    "calc_aip_lens1_profile_msms_display_list": {"label": "Lens Profile - MS/MS", "category": "Focus Pre TOF"},
+    "calc_aip_storage_time_ms": {"label": "Storage Time - MS", "category": "Focus Pre TOF"},
+    "calc_aip_storage_time_msms": {"label": "Storage Time - MS/MS", "category": "Focus Pre TOF"}
+}
+
+
 PARAMETER_DEPENDENCY_MAP = {
     "IMS_imeX_RampStart": "IMS_imeX_Mode",
     "IMS_imeX_RampEnd": "IMS_imeX_Mode",
@@ -30,16 +56,31 @@ class AppConfig:
         self.user_view_definitions_path = os.path.join(USER_CONFIG_DIR, USER_VIEW_DEFINITIONS_FILENAME)
         
         self._all_definitions: Optional[List[Dict]] = None
+        self._parameter_config_map: Optional[Dict[str, Dict]] = None
         self._parameter_definitions: Optional[Dict[str, List[str]]] = None
-        self._parameter_definitions: Optional[List[str]] = None
         self._display_name_map: Optional[Dict[str, str]] = None
         self._third_party_licenses: Optional[Dict] = None
-        
+        self._instrument_key_map: Optional[Dict[str, str]] = None
+
+    @property
+    def instrument_key_map(self) -> Dict[str, str]:
+        if self._instrument_key_map is None:
+            self._instrument_key_map = self._load_json_from_file("instrument_keys.json")
+        return self._instrument_key_map
+
     @property
     def all_definitions(self) -> List[Dict]:
         if self._all_definitions is None:
             self._all_definitions = self._load_definitions_from_cfg_files()
         return self._all_definitions
+
+    @property
+    def parameter_config_map(self) -> Dict[str, Dict]:
+        if self._parameter_config_map is None:
+            self._parameter_config_map = {
+                p['permname']: p for p in self.all_definitions if 'permname' in p
+            }
+        return self._parameter_config_map
 
     @property
     def parameter_definitions(self) -> Dict[str, List[str]]:
@@ -240,20 +281,6 @@ class AppConfig:
             self.logger.error("Failed to load or parse embedded properties file %s: %s", file_name, e)
             messagebox.showerror("Configuration Error", f"Could not load or parse embedded properties file: {file_name}\n\nDetails: {e}")
             return {}
-            
-    def get_embedded_config_content(self, relative_path: str) -> Optional[str]:
-        normalized_key = relative_path.replace('\\', '/')
-        content = CONFIG_DATA.get(normalized_key)
-        if content is None:
-             base_name_key = os.path.basename(normalized_key)
-             content = CONFIG_DATA.get(base_name_key)
-             if content:
-                 self.logger.debug(f"Found embedded content using basename key: {base_name_key}")
-             else:
-                 self.logger.warning(f"Embedded config content not found for key '{normalized_key}' or basename '{base_name_key}'.")
-        else:
-             self.logger.debug(f"Found embedded content using key: {normalized_key}")
-        return content
     
     def get_factory_default_views(self) -> Dict[str, List[str]]:
         self.logger.info("Loading factory default view definitions directly.")

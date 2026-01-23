@@ -3,6 +3,7 @@
 import os
 import logging
 import tkinter as tk
+import threading
 from tkinter import filedialog, ttk, messagebox
 from tkinter.font import Font
 from tkinterdnd2 import DND_FILES
@@ -16,11 +17,12 @@ import pandas as pd
 
 from app_config import AppConfig 
 from data_model import Dataset 
-from services import DataLoaderService, PlottingService, ReportGeneratorService, DataProcessingError 
+from services import DataLoaderService, PlottingService, ReportGeneratorService, SessionService, DataProcessingError
 from utils import format_parameter_value, resource_path, apply_dark_title_bar 
 from .parameter_selection import ParameterSelectionWindow 
 from PIL import Image, ImageTk 
 from .view_manager import ViewManager
+from .report_wizard import ReportWizard
 
 class Tooltip: 
     def __init__(self, widget, text_callback): 
@@ -99,14 +101,27 @@ class AboutDialog(ctk.CTkToplevel):
         self.bind("<Map>", self._on_map)
         
         self.title("About timsCompare") 
-        self.geometry("600x600") 
+        window_width, window_height = 600, 500
+        
+        master_x = master.winfo_rootx()
+        master_y = master.winfo_rooty()
+        master_width = master.winfo_width()
+        master_height = master.winfo_height()
+        
+        pos_x = master_x + (master_width // 2) - (window_width // 2)
+        pos_y = master_y + (master_height // 2) - (window_height // 2)
+        
+
+        self.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+
+
         self.resizable(False, False) 
         self.transient(master) 
         self.grab_set() 
 
         main_frame = ctk.CTkFrame(self, fg_color="#04304D") 
         main_frame.pack(fill="both", expand=True) 
-        main_frame.grid_columnconfigure(0, weight=1) 
+        main_frame.grid_columnconfigure(0, weight=1)
 
         top_frame = ctk.CTkFrame(main_frame, fg_color="transparent") 
         top_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew") 
@@ -117,28 +132,24 @@ class AboutDialog(ctk.CTkToplevel):
         
         title_label = ctk.CTkLabel( 
             top_frame, 
-            text="timsCompare v1.1", 
+            text="timsCompare v1.3", 
             font=ctk.CTkFont(size=22, weight="bold"), 
             text_color="#E4EFF7" 
         ) 
         title_label.grid(row=0, column=1, sticky="w") 
 
         description_text = (
-            "timsCompare is a desktop application for mass spectrometry users, designed to analyze "
-            "and compare Bruker's .d / .m methods. It handles multi-segment methods and supports "
-            "a wide range of acquisition modes including PASEF, dia-PASEF, diagonal-PASEF, and more.\n\n"
-            "Methods can be loaded using the 'Add Data' button or via drag-and-drop.\n\n"
-            "The tool's core functionalities are:\n\n"
-            "1. Parameter Comparison: Provides a detailed, side-by-side view of acquisition "
-            "parameters (including instrument model and method version), automatically highlighting differences. "
-            "Users can customize the default parameters shown for each scan mode via the 'Manage Views' option.\n\n"
-            "2. Window Export: Offers a function to export the isolation "
-            "window definitions for PASEF, dia-PASEF, and diagonal-PASEF methods.\n\n"
-            "3. Method Reporting: Generates comprehensive method reports in "
-            "both PDF and CSV formats for documentation or publication.\n\n"
+            "timsCompare is a desktop application designed for mass spectrometry users to "
+            "inspect, compare, and document Bruker acquisition methods (.d folders or .m folders).\n\n"
+            "It provides a clear, side-by-side view of instrument parameters, highlighting differences "
+            "across files and segments. The tool is optimized for different acquisition modes (PASEF, "
+            "dia-PASEF, diagonal-PASEF and more) and features interactive scan geometry plotting, automated "
+            "batch reporting (PDF/CSV), and scan window export capabilities.\n\n"
+            "For detailed documentation please visit the GitHub repository.\n\n"
             "Disclaimer: This is an independent, third-party tool and is not an "
             "official Bruker product, nor is it affiliated with or supported by Bruker."
         )
+
         desc_label = ctk.CTkLabel( 
             main_frame, 
             text=description_text, 
@@ -150,17 +161,25 @@ class AboutDialog(ctk.CTkToplevel):
         
         libs_label = ctk.CTkLabel( 
             main_frame, 
-            text="Built with: Python, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, tkinterdnd2, fontTools, defusedxml", 
+            text="Built with: Python®, CustomTkinter, Pandas, Matplotlib, Pillow, fpdf2, tkinterdnd2, fontTools, defusedxml", 
             font=ctk.CTkFont(size=11), 
             text_color="gray60" 
         ) 
-        libs_label.grid(row=2, column=0, padx=20, pady=(10, 15)) 
+        libs_label.grid(row=2, column=0, padx=20, pady=(10, 5), sticky="ew") 
+
+        trademark_label = ctk.CTkLabel(
+            main_frame,
+            text="'Python' is a registered trademark of the Python Software Foundation.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray60"
+        )
+        trademark_label.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
 
         separator = ctk.CTkFrame(main_frame, height=1, fg_color="#1A5680") 
-        separator.grid(row=3, column=0, padx=20, pady=5, sticky="ew") 
+        separator.grid(row=4, column=0, padx=20, pady=5, sticky="ew") 
 
         footer_frame = ctk.CTkFrame(main_frame, fg_color="transparent") 
-        footer_frame.grid(row=4, column=0, padx=20, pady=10, sticky="ew") 
+        footer_frame.grid(row=5, column=0, padx=20, pady=10, sticky="ew") 
         footer_frame.grid_columnconfigure((0, 2), weight=1)
 
         button_container = ctk.CTkFrame(footer_frame, fg_color="transparent")
@@ -236,9 +255,6 @@ class AboutDialog(ctk.CTkToplevel):
                 full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
                 full_text += f"{info.get('text', 'No license text found.')}\n\n"
                 full_text += "=" * 70 + "\n\n"
-                full_text += f"--- {lib_name.upper()} ({info.get('license', 'N/A')}) ---\n\n"
-                full_text += f"{info.get('text', 'No license text found.')}\n\n"
-                full_text += "=" * 70 + "\n\n"
             
             textbox.insert("1.0", full_text)
 
@@ -250,14 +266,19 @@ class AboutDialog(ctk.CTkToplevel):
 
 
 class timsCompareApp: 
-    def __init__(self, root: tk.Tk, config: AppConfig, data_loader: DataLoaderService, plot_service: PlottingService, report_generator: ReportGeneratorService): 
+    def __init__(self, root: tk.Tk, config: AppConfig, data_loader: DataLoaderService, 
+                 plot_service: PlottingService, report_generator: ReportGeneratorService,
+                 session_service: SessionService): 
         self.root = root 
 
         self.config = config 
         self.loader = data_loader 
         self.plotter = plot_service 
         self.report_generator = report_generator 
+        self.session_service = session_service
         self.logger = logging.getLogger(__name__) 
+
+        self.is_loading = False
 
         self.last_selected_source: Optional[str] = None
 
@@ -267,7 +288,7 @@ class timsCompareApp:
             self.root.unblock_update_dimensions_event = lambda: None 
 
         self.root.title("timsCompare") 
-        self.root.geometry("1500x860") 
+        self.root.geometry("1650x860") 
 
         self.datasets: List[Dataset] = [] 
         self.displayed_params: Optional[List[Dict]] = None 
@@ -328,8 +349,15 @@ class timsCompareApp:
         top_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent") 
         top_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="ew") 
 
-        self.add_menu_button = ctk.CTkButton(top_frame, text="Add Data", image=self.add_data_icon, command=self._show_add_menu) 
-        self.add_menu_button.pack(side="left", padx=(0, 10)) 
+        self.load_files_button = ctk.CTkButton(top_frame, text="Load Files", image=self.add_data_icon, command=self._show_load_files_menu) 
+        self.load_files_button.pack(side="left", padx=(0, 10)) 
+        
+        self.load_files_menu = tk.Menu(self.root, tearoff=0) 
+        self.load_files_menu.add_command(label="Load Data (.d / .m)", command=self._add_universal_folder_dialog) 
+        self.load_files_menu.add_command(label="Load Session (.tcs)", command=self._load_session_dialog) 
+
+        self.save_session_button = ctk.CTkButton(top_frame, text="Save Session", image=self.save_session_icon, command=self._save_session_dialog)
+        self.save_session_button.pack(side="left", padx=(0, 10))
 
         self.add_params_button = ctk.CTkButton(top_frame, text="Add Parameters", image=self.add_params_icon, command=self._open_add_parameters_dialog) 
         self.add_params_button.pack(side="left", padx=(0, 10)) 
@@ -363,9 +391,6 @@ class timsCompareApp:
         self.segment_controls_frame.grid_remove() 
 
         self.plot_toggle_menu = tk.Menu(self.root, tearoff=0) 
-        self.add_menu = tk.Menu(self.root, tearoff=0) 
-        self.add_menu.add_command(label="Add .d Folder...", command=lambda: self._add_folder_dialog(".d")) 
-        self.add_menu.add_command(label="Add .m Folder...", command=lambda: self._add_folder_dialog(".m")) 
 
         self.table_frame = ctk.CTkFrame(self.main_frame, fg_color="#E4EFF7", corner_radius=0, border_width=0) 
         self.table_frame.grid(row=2, column=0, sticky="nsew", padx=(10, 2), pady=5) 
@@ -405,9 +430,20 @@ class timsCompareApp:
         plot_button_frame = ctk.CTkFrame(self.right_plot_container, fg_color="transparent")
         plot_button_frame.grid(row=0, column=0, sticky="ne", padx=5, pady=(5,0))
 
-        self.autofit_plot_button = ctk.CTkButton(plot_button_frame, text="", image=self.resize_axis_icon, command=self._toggle_autofit_plots, width=28, fg_color="transparent", hover_color="#DFE5EA")
+        self.autofit_plot_button = ctk.CTkButton(
+            plot_button_frame, 
+            text="", 
+            image=self.resize_axis_icon, 
+            command=self._toggle_autofit_plots, 
+            width=28, 
+            fg_color="transparent", 
+            hover_color="#DFE5EA"
+        )
         self.autofit_plot_button.pack(side="left", padx=(0, 5))
         Tooltip(self.autofit_plot_button, lambda: "Toggle Full Axis Range / Autofit")
+        
+        self.autofit_plot_button.bind("<Enter>", self._on_autofit_enter)
+        self.autofit_plot_button.bind("<Leave>", self._on_autofit_leave)
 
         self.plot_toggle_button = ctk.CTkButton(plot_button_frame, text="", image=self.plots_icon, command=self._show_plot_toggle_menu, width=28, fg_color="transparent", hover_color="#DFE5EA") 
         self.plot_toggle_button.pack(side="left") 
@@ -438,12 +474,26 @@ class timsCompareApp:
         self.export_menu_button.grid(row=0, column=2, padx=(0, 5)) 
 
         self.export_menu = tk.Menu(self.root, tearoff=0) 
-        self.export_menu.add_command(label="Windows", command=self.export_scan_windows) 
-        self.export_menu.add_command(label="Method Report...", command=self._open_report_generator_dialog) 
+        self.export_menu.add_command(label="MS/MS Windows (Current File)", command=self.export_scan_windows)
+        self.export_menu.add_separator()
+        self.export_menu.add_command(label="Report Wizard (PDF/CSV)", command=self._open_report_wizard) # Updated label and command
 
         self.remove_button = ctk.CTkButton(self.left_controls, text="Remove", image=self.remove_icon, command=self._remove_selected_folder, width=28, height=28) 
         self.remove_button.grid(row=0, column=3) 
         Tooltip(self.remove_button, lambda: "Remove selected dataset") 
+
+        self.remove_all_button = ctk.CTkButton(
+            self.left_controls, 
+            text="Remove All", 
+            image=self.remove_all_icon, # <--- Added Icon
+            fg_color="#C0392B", 
+            hover_color="#E74C3C", 
+            command=self._remove_all_folders, 
+            width=80, 
+            height=28
+        )
+        self.remove_all_button.grid(row=0, column=4, padx=(5, 0))
+        Tooltip(self.remove_all_button, lambda: "Clear all loaded datasets")
 
         right_status_frame = ctk.CTkFrame(bottom_frame, fg_color="transparent") 
         right_status_frame.grid(row=0, column=1, sticky="ew") 
@@ -455,7 +505,26 @@ class timsCompareApp:
         Tooltip(self.status_bar_label, lambda: self.status_label_full_text) 
         
         self.root.drop_target_register(DND_FILES) 
-        self.root.dnd_bind('<<Drop>>', self._handle_drop) 
+        self.root.dnd_bind('<<Drop>>', self._handle_drop)
+    
+    def _remove_all_folders(self):
+        if not self.datasets:
+            return
+            
+        confirm = messagebox.askyesno("Remove All", "Are you sure you want to remove all loaded datasets?", parent=self.root)
+        if confirm:
+            self.datasets.clear()
+            self.displayed_params = None
+            self._redraw_ui()
+            self.status_bar_label.configure(text="Ready")
+    
+    def _on_autofit_enter(self, event):
+        if not self.autofit_plots_var.get():
+            self.autofit_plot_button.configure(image=self.resize_axis_icon)
+
+    def _on_autofit_leave(self, event):
+        if not self.autofit_plots_var.get():
+            self.autofit_plot_button.configure(image=self.resize_axis_icon_active)
 
     def _schedule_remove_menu_update(self, event=None): 
         if self._remove_menu_resize_job: 
@@ -469,7 +538,7 @@ class timsCompareApp:
             self.remove_var.set("-") 
             return 
         
-        max_width = 150 # Default/fallback width
+        max_width = 150 
         try:
             self.left_controls.update_idletasks()
 
@@ -486,7 +555,7 @@ class timsCompareApp:
 
         except Exception as e:
             self.logger.debug(f"Could not calculate dropdown width dynamically, falling back. Error: {e}")
-            max_width = 150 # Use default if calculation fails
+            max_width = 150 
 
         if max_width <= 0: return
 
@@ -520,61 +589,137 @@ class timsCompareApp:
             for t, f in self.dropdown_name_map.items(): 
                 if f == current_full: self.remove_var.set(t); break 
     
-    def _on_segment_selected(self, dataset_key: str, choice: str): 
-        target_dataset = next((d for d in self.datasets if d.key_path == dataset_key), None) 
-        if not target_dataset: return 
+    def _on_segment_selected(self, dataset: Dataset, choice: str, var: ctk.StringVar): 
+        if choice == "Compare Segments...":
+
+            all_indices = list(range(len(dataset.segments)))
+            
+            self._add_segment_views(dataset, all_indices, replace_original=True)
+            return
 
         try: 
             new_index = int(choice.split(' ')[1]) - 1 
-            if 0 <= new_index < len(target_dataset.segments): 
-                target_dataset.active_segment_index = new_index 
+            if 0 <= new_index < len(dataset.segments): 
+                dataset.active_segment_index = new_index 
                 self._update_treeview_data() 
                 self._update_plot_grid() 
         except (ValueError, IndexError): 
-            print(f"Warning: Could not parse segment index from choice '{choice}'") 
+            print(f"Warning: Could not parse segment index from choice '{choice}'")
 
     def _update_segment_controls(self): 
         for widget in self.segment_controls_frame.winfo_children(): 
             widget.destroy() 
         self.segment_dropdowns.clear() 
 
-        has_segmented_run = any(len(dataset.segments) > 1 for dataset in self.datasets) 
+        datasets_with_controls = [
+            d for d in self.datasets 
+            if len(d.segments) > 1 and not getattr(d, 'is_segment_comparison', False)
+        ]
 
-        if has_segmented_run: 
+        if datasets_with_controls: 
             self.segment_controls_frame.grid() 
-            for i, dataset in enumerate(self.datasets): 
-                if len(dataset.segments) > 1: 
-                    control_container = ctk.CTkFrame(self.segment_controls_frame, fg_color="transparent") 
-                    control_container.pack(side="left", padx=(0, 20), pady=2) 
+            for dataset in datasets_with_controls: 
+                control_container = ctk.CTkFrame(self.segment_controls_frame, fg_color="transparent") 
+                control_container.pack(side="left", padx=(0, 20), pady=2) 
 
-                    label_text = self._truncate_text(dataset.display_name, 150, self.optionmenu_font) 
-                    label = ctk.CTkLabel(control_container, text=f"{label_text}:", text_color="#E4EFF7") 
-                    label.pack(side="left", padx=(0, 5)) 
-                    Tooltip(label, lambda name=dataset.display_name: name) 
+                label_text = self._truncate_text(dataset.display_name, 150, self.optionmenu_font) 
+                label = ctk.CTkLabel(control_container, text=f"{label_text}:", text_color="#E4EFF7") 
+                label.pack(side="left", padx=(0, 5)) 
+                Tooltip(label, lambda name=dataset.display_name: name) 
 
-                    label.bind("<Enter>", lambda e, name=dataset.display_name: self._set_status_bar_text(name)) 
-                    label.bind("<Leave>", lambda e: self._set_status_bar_text("")) 
+                var = ctk.StringVar() 
+                menu_choices = []
+                for i, seg in enumerate(dataset.segments):
+                    label = f"Segment {i+1} ({seg.start_time:.2f} - {seg.end_time_display})"
+                    if seg.is_calibration_segment:
+                        label += " (Calibration)"
+                    menu_choices.append(label)
+                
+                menu_choices.append("Compare Segments...") 
 
-                    var = ctk.StringVar() 
-                    menu_choices = []
-                    for i, seg in enumerate(dataset.segments):
-                        label = f"Segment {i+1} ({seg.start_time:.2f} - {seg.end_time_display})"
-                        if seg.is_calibration_segment:
-                            label += " (Calibration)"
-                        menu_choices.append(label)
+                menu = ctk.CTkOptionMenu( 
+                    control_container, 
+                    variable=var, 
+                    values=menu_choices, 
+                    command=lambda choice, ds=dataset: self._on_segment_selected(ds, choice, var) 
+                ) 
+                menu.pack(side="left") 
 
-                    menu = ctk.CTkOptionMenu( 
-                        control_container, 
-                        variable=var, 
-                        values=menu_choices, 
-                        command=lambda choice, key=dataset.key_path: self._on_segment_selected(key, choice) 
-                    ) 
-                    menu.pack(side="left") 
-
-                    var.set(menu_choices[dataset.active_segment_index]) 
-                    self.segment_dropdowns[dataset.key_path] = {'var': var, 'menu': menu} 
+                current_seg_label = menu_choices[dataset.active_segment_index]
+                var.set(current_seg_label) 
+                
+                self.segment_dropdowns[dataset.key_path] = {'var': var, 'menu': menu} 
         else: 
-            self.segment_controls_frame.grid_remove() 
+            self.segment_controls_frame.grid_remove()
+    
+    def _open_segment_comparison_dialog(self, dataset: Dataset):
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Select Segments to Compare")
+        dialog.geometry("400x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        apply_dark_title_bar(dialog)
+
+        ctk.CTkLabel(dialog, text=f"Compare segments for:\n{dataset.display_name}", 
+                     font=ctk.CTkFont(weight="bold"), text_color="#E4EFF7").pack(pady=10)
+        
+        scroll = ctk.CTkScrollableFrame(dialog, label_text="Available Segments", fg_color="#E4EFF7", label_text_color="#04304D")
+        scroll.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        vars_map = {}
+        
+        for i, seg in enumerate(dataset.segments):
+            
+            is_active = (i == dataset.active_segment_index)
+            label_text = f"Segment {i+1} ({seg.start_time:.2f} - {seg.end_time_display})"
+            
+            var = tk.BooleanVar(value=False)
+            vars_map[i] = var
+            
+            if is_active:
+                label_text += " (Currently Active)"
+            
+            cb = ctk.CTkCheckBox(scroll, text=label_text, variable=var, text_color="#04304D")
+            cb.pack(anchor="w", padx=5, pady=5)
+            
+        def apply():
+            selected_indices = [i for i, v in vars_map.items() if v.get()]
+            if selected_indices:
+                self._add_segment_views(dataset, selected_indices)
+            dialog.destroy()
+
+        ctk.CTkButton(dialog, text="Compare Selected", command=apply).pack(pady=15)
+    
+    def _add_segment_views(self, original_dataset: Dataset, segment_indices: List[int], replace_original: bool = False):
+        new_datasets = []
+        
+        for idx in segment_indices:
+            ds_copy = copy.copy(original_dataset)
+            
+            ds_copy.active_segment_index = idx
+            
+            ds_copy.key_path = f"{original_dataset.key_path}::seg_{idx}" 
+            
+            ds_copy.is_segment_comparison = True 
+            
+            ds_copy.display_name = original_dataset.display_name
+            
+            ds_copy.is_plotted_var = tk.BooleanVar(value=True)
+            new_datasets.append(ds_copy)
+            
+        if replace_original:
+            try:
+                insert_pos = self.datasets.index(original_dataset)
+                self.datasets.pop(insert_pos)
+                for new_ds in reversed(new_datasets):
+                    self.datasets.insert(insert_pos, new_ds)
+            except ValueError:
+                self.datasets.extend(new_datasets)
+        else:
+            self.datasets.extend(new_datasets)
+
+        self._redraw_ui()
+        self.status_bar_label.configure(text=f"Comparing {len(new_datasets)} segments for {original_dataset.display_name}.")
 
     def _reset_to_default_parameters(self): 
         if self.displayed_params is not None: 
@@ -590,39 +735,112 @@ class timsCompareApp:
 
     def _handle_drop(self, event: tk.Event): 
         paths = self.root.tk.splitlist(event.data) 
+        
+        session_files = [p for p in paths if os.path.isfile(p) and p.lower().endswith(".tcs")]
+        
+        if session_files:
+            if len(session_files) > 1:
+                messagebox.showwarning("Drag & Drop", "Multiple session files detected. Loading only the first one.")
+            
+            session_path = session_files[0]
+            
+            if self.datasets:
+                confirm = messagebox.askyesno("Load Session", "Dropping a session file will replace the current open files.\nContinue?")
+                if not confirm:
+                    return
+
+            thread = threading.Thread(target=self._load_session_thread, args=(session_path,))
+            thread.start()
+            return
+
         valid_folders = [p for p in paths if os.path.isdir(p) and p.lower().endswith((".d", ".m"))] 
-        if not valid_folders: 
-            messagebox.showwarning("Drag & Drop Info", "No valid .d or .m folders were dropped.") 
-            return 
-        self._load_folders(valid_folders) 
+        
+        if valid_folders: 
+            self._load_folders(valid_folders) 
+        else:
+            messagebox.showwarning("Drag & Drop Info", "No valid session files (.tcs) or data folders (.d/.m) were dropped.")
 
     def _add_folder_dialog(self, extension: str): 
         folder = filedialog.askdirectory(title=f"Select a {extension} folder") 
         if not folder or not folder.lower().endswith(extension): 
             return 
         self._load_folders([folder]) 
+    
+    def _show_load_files_menu(self):
+        self.load_files_menu.tk_popup(self.load_files_button.winfo_rootx(), self.load_files_button.winfo_rooty() + self.load_files_button.winfo_height())
 
-    def _load_folders(self, folder_paths: List[str]): 
-        loaded_count = 0 
-        for path in folder_paths: 
-            if any(d.key_path == path for d in self.datasets): 
-                messagebox.showinfo("Already Loaded", f"The data for '{os.path.basename(path)}' is already loaded.") 
-                continue 
-            try: 
-                dataset = self.loader.load_dataset_from_folder(path) 
-                if dataset: 
-                    self.datasets.append(dataset) 
-                    loaded_count += 1 
-                else: 
-                    messagebox.showerror("Load Error", f"Failed to load dataset from:\n{path}\n\nThe service returned an invalid object.") 
-            except DataProcessingError as e: 
-                messagebox.showerror("Error Loading Data", str(e)) 
-            except Exception as e: 
-                messagebox.showerror("An Unexpected Error Occurred", f"An unexpected error occurred while loading '{os.path.basename(path)}':\n\n{e.__class__.__name__}: {e}") 
+    def _add_universal_folder_dialog(self):
+        folder = filedialog.askdirectory(title="Select a .d or .m folder")
+        if not folder: return
+        
+        if folder.lower().endswith((".d", ".m")):
+            self._load_folders([folder])
+        else:
+            messagebox.showwarning("Invalid Selection", "Please select a folder ending in .d or .m")
 
-        if loaded_count > 0: 
-            self.displayed_params = None 
-            self._redraw_ui() 
+    def _load_folders(self, folder_paths: List[str]):
+        self.is_loading = True
+        self.load_files_button.configure(state="disabled")
+        self.status_bar_label.configure(text="Loading datasets... Please wait.")
+        self.root.config(cursor="watch") 
+        
+        thread = threading.Thread(target=self._load_folders_thread, args=(folder_paths,))
+        thread.daemon = True 
+        thread.start()
+
+    def _load_folders_thread(self, folder_paths: List[str]):
+        new_datasets = []
+        errors = []
+        
+        existing_paths = {d.key_path for d in self.datasets}
+
+        for path in folder_paths:
+            if path in existing_paths:
+                continue
+            
+            try:
+                dataset = self.loader.load_dataset_from_folder(path)
+                if dataset:
+                    new_datasets.append(dataset)
+                else:
+                    errors.append(f"{os.path.basename(path)}: Service returned invalid data.")
+            except DataProcessingError as e:
+                errors.append(f"{os.path.basename(path)}: {str(e)}")
+            except Exception as e:
+                self.logger.error(f"Unexpected error loading {path}", exc_info=True)
+                errors.append(f"{os.path.basename(path)}: Unexpected error ({e})")
+
+        self.root.after(0, lambda: self._on_folders_loaded(new_datasets, errors))
+
+    def _on_folders_loaded(self, new_datasets: List[Dataset], errors: List[str]):
+        self.is_loading = False
+        self.root.config(cursor="")
+        self.load_files_button.configure(state="normal")
+        
+        if new_datasets:
+            self.datasets.extend(new_datasets)
+            
+            if self.displayed_params is not None:
+                all_sources = set()
+                for ds in self.datasets:
+                    all_sources.update(ds.available_sources)
+                
+                for new_ds in new_datasets:
+                    for source in all_sources:
+                        self.loader.parse_additional_parameters(new_ds, self.displayed_params, ion_source=source)
+                    
+                    self.loader.parse_additional_parameters(new_ds, self.displayed_params, ion_source=None)
+            else:
+                self.displayed_params = None 
+
+            self._redraw_ui()
+            self.status_bar_label.configure(text=f"Loaded {len(new_datasets)} new dataset(s).")
+        else:
+            self.status_bar_label.configure(text="Ready")
+
+        if errors:
+            error_msg = "The following errors occurred during loading:\n\n" + "\n".join(errors)
+            messagebox.showerror("Load Errors", error_msg)
 
     def _remove_selected_folder(self): 
         selected_truncated_name = self.remove_var.get() 
@@ -788,6 +1006,7 @@ class timsCompareApp:
 
     def _update_treeview_data(self):
         for row in self.tree.get_children(): self.tree.delete(row)
+        
         if not self.datasets:
             self.tree.configure(show="tree"); self.tree.heading("#0", text="")
             return
@@ -797,133 +1016,28 @@ class timsCompareApp:
         if self.displayed_params is None:
             self.displayed_params = self.loader.get_default_parameters_for_view(self.datasets)
 
-        all_display_configs_initial = self.displayed_params
+        view_data = self.loader.get_parameter_view_data(self.datasets, self.displayed_params)
 
-        has_ats_on = any(ds.get_parameter_value("IMS_ATS_Active") == '1' for ds in self.datasets if ds.segments)
-        has_ats_off = any(ds.get_parameter_value("IMS_ATS_Active") != '1' for ds in self.datasets if ds.segments)
-        is_mixed_ats_mode = has_ats_on and has_ats_off
-        all_known_permnames = {p['permname'] for p in self.config.all_definitions}
-
-        all_display_configs = []
-        for param_config in all_display_configs_initial:
-            permname = param_config.get('permname')
-            if not permname: continue
-
-            is_ats_param = "_ATS_" in permname
-            is_paired = False
-            if is_ats_param:
-                counterpart = permname.replace("_ATS_", "_", 1)
-                if counterpart in all_known_permnames: is_paired = True
-            else:
-                parts = permname.split('_', 1)
-                if len(parts) > 1:
-                    counterpart = f"{parts[0]}_ATS_{parts[1]}"
-                    if counterpart in all_known_permnames: is_paired = True
-
-            config_to_add = param_config
-            if is_paired and permname != "IMS_ATS_Active":
-                if is_mixed_ats_mode:
-                    if is_ats_param:
-                        config_to_add = copy.copy(param_config)
-                        config_to_add['label'] = f"{param_config.get('label', permname)} (Stepping active)"
-                elif has_ats_on:
-                    if not is_ats_param: continue
-                else: 
-                    if is_ats_param: continue
-            elif is_ats_param and not has_ats_on and permname != "IMS_ATS_Active":
-                continue
-
-            all_display_configs.append(config_to_add)
-
-        displayed_permnames = {p['permname'] for p in all_display_configs}
-        if "calc_scan_mode" in displayed_permnames:
-            all_display_configs = [p for p in all_display_configs if p.get('permname') != "Mode_ScanMode"]
-
-        grouped_params = defaultdict(list)
-        for p_config in all_display_configs:
-            grouped_params[p_config.get("category", "General")].append(p_config)
-
-        if "Mode" not in grouped_params: grouped_params["Mode"] = []
-        calib_param_config = {"permname": "calc_is_calibration", "label": "Calibration Segment", "category": "Mode"}
-        if not any(p['permname'] == 'calc_is_calibration' for p in grouped_params["Mode"]):
-             grouped_params["Mode"].insert(0, calib_param_config)
-
-        def sort_key(g):
-            if g == "General": return (0, g)
-            if g == "Mode": return (1, g)
-            if g == "Calculated Parameters": return (99, g)
-            return (2, g)
-        sorted_groups = sorted(grouped_params.keys(), key=sort_key)
-
-        default_params_for_sorting = self.loader.get_default_parameters_for_view(self.datasets)
-        order_map = {p['permname']: i for i, p in enumerate(default_params_for_sorting)}
-
-        any_model_identified = any(ds.instrument_model and ds.instrument_model != "Unknown" for ds in self.datasets)
-
-        displayed_param_keys = set()
-        for group_name in sorted_groups:
-
+        for group_name, rows in view_data.items():
             parent_node = self.tree.insert("", "end", text=group_name, open=True)
 
-            params_in_group = sorted(
-                grouped_params[group_name],
-                key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', ''))
-            )
-
-            for param_config in params_in_group:
-                permname = param_config['permname']
-
-                if permname == "calc_instrument_model":
-                    if not any_model_identified:
-                        continue 
-                    values = [(ds.instrument_model if ds.instrument_model != "Unknown" else "N/A") for ds in self.datasets]
-                    self._insert_row(param_config, parent_node, values)
-                    displayed_param_keys.add(permname)
-                    continue
-                # --- END MODIFIED ---
-                elif permname == "calc_tims_control_version":
-                    values = [ds.tims_control_version or "N/A" for ds in self.datasets]
-                    self._insert_row(param_config, parent_node, values)
-                    displayed_param_keys.add(permname)
-                    continue
-                elif permname == "calc_last_modified_date":
-                    values = [ds.last_modified_date or "N/A" for ds in self.datasets]
-                    formatted_values = []
-                    for v in values:
-                         try: formatted_values.append(v.split('T')[0] if v and 'T' in v else v or "N/A")
-                         except: formatted_values.append(v or "N/A")
-                    self._insert_row(param_config, parent_node, formatted_values)
-                    displayed_param_keys.add(permname)
-                    continue
-                elif permname == "calc_is_calibration":
-                    calib_values = []
-                    for ds in self.datasets:
-                        try: calib_values.append("Yes" if ds.segments[ds.active_segment_index].is_calibration_segment else "No")
-                        except IndexError: calib_values.append("N/A")
-                    self._insert_row(param_config, parent_node, calib_values)
-                    displayed_param_keys.add(permname)
-                    continue
-
-                is_present_in_any_active_segment = any(
-                    permname in ds.segments[ds.active_segment_index].parameters
-                    for ds in self.datasets if ds.segments
-                )
-                if not is_present_in_any_active_segment: continue
-                if permname in displayed_param_keys: continue
-
-                raw_values = []
-                for ds in self.datasets:
-                     try: raw_values.append(ds.segments[ds.active_segment_index].parameters.get(permname))
-                     except IndexError: raw_values.append(None)
-
-                is_list_param = any(isinstance(val, list) for val in raw_values)
-                if is_list_param:
-                    self._insert_expandable_list_rows(param_config, parent_node, raw_values)
+            for row in rows:
+                if row['is_list']:
+                    param_config = row.get('config', {"permname": row['permname']})
+                    
+                    self._insert_expandable_list_rows(param_config, parent_node, row['values'])
                 else:
-                    formatted_values = [format_parameter_value(val, param_config) for val in raw_values]
-                    self._insert_row(param_config, parent_node, formatted_values)
-
-                displayed_param_keys.add(permname)
+                    is_different = row['is_diff']
+                    if self.show_only_diffs_var.get() and not is_different:
+                        continue
+                    
+                    self.tree.insert(
+                        parent_node, 
+                        "end", 
+                        text=row['label'], 
+                        values=tuple(row['values']), 
+                        tags=('diff',) if is_different else ()
+                    )
 
         for parent_iid in self.tree.get_children(''):
             children = self.tree.get_children(parent_iid)
@@ -932,22 +1046,45 @@ class timsCompareApp:
             else:
                 for i, child_iid in enumerate(children):
                     tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-                    current_tags = [t for t in list(self.tree.item(child_iid, 'tags')) if t not in ['evenrow', 'oddrow']]
+                    current_tags = list(self.tree.item(child_iid, 'tags'))
+                    current_tags = [t for t in current_tags if t not in ['evenrow', 'oddrow']]
                     current_tags.append(tag)
                     self.tree.item(child_iid, tags=tuple(current_tags))
 
     def _setup_styles(self): 
         style = ttk.Style() 
         style.theme_use("clam") 
+
+        try:
+            theme_font = ctk.ThemeManager.theme.get("CTkFont", {})
+            font_family = theme_font.get("family", "Segoe UI")
+            font_size = theme_font.get("size", 13)
+
+            msg_font = Font(family=font_family, size=font_size)
+            
+            dynamic_row_height = max(25, msg_font.metrics("linespace") + 6)
+            
+        except Exception as e:
+            self.logger.warning(f"Could not calculate dynamic row height: {e}. Using fallback.")
+            dynamic_row_height = 30
+
         style.configure("Treeview.Heading", background="#004E82", foreground="white", font=('TkDefaultFont', 10, 'bold'), padding=5) 
         style.map("Treeview.Heading", background=[('active', "#0071BC")]) 
         
-        style.configure("Treeview", background="#E4EFF7", foreground="#04304D", fieldbackground="#E4EFF7", rowheight=25, borderwidth=0, highlightthickness=0, relief='flat', bordercolor="#E4EFF7") 
+        style.configure("Treeview", 
+                        background="#E4EFF7", 
+                        foreground="#04304D", 
+                        fieldbackground="#E4EFF7", 
+                        rowheight=dynamic_row_height, 
+                        borderwidth=0, 
+                        highlightthickness=0, 
+                        relief='flat', 
+                        bordercolor="#E4EFF7") 
         
         style.map("Treeview", 
                   background=[('selected', '#0071BC')], 
                   foreground=[('selected', 'white')], 
-                  bordercolor=[('focus', '#E4EFF7')]) 
+                  bordercolor=[('focus', '#E4EFF7')])
 
     def _get_param_key(self, param: Dict) -> str: 
         return f"{param['permname']}|{param.get('polarity')}|{param.get('source')}" 
@@ -1011,7 +1148,7 @@ class timsCompareApp:
 
         for ds in self.datasets: 
             self.tree.heading(ds.key_path, text=ds.display_name, anchor="center") 
-            self.tree.column(ds.key_path, width=150, anchor="center", minwidth=100) 
+            self.tree.column(ds.key_path, width=175, anchor="center", minwidth=100) 
 
     def _toggle_plot_pane(self): 
         is_visible = self.plots_visible.get() 
@@ -1048,12 +1185,20 @@ class timsCompareApp:
         self.autofit_plots_var.set(new_state)
         
         if new_state: 
-            self.autofit_plot_button.configure(fg_color="transparent")
+            self.autofit_plot_button.configure(
+                fg_color="transparent", 
+                image=self.resize_axis_icon, 
+                hover_color="#DFE5EA"
+            )
         else: 
-            self.autofit_plot_button.configure(fg_color="#0071BC") 
+            self.autofit_plot_button.configure(
+                fg_color="#004E82", 
+                image=self.resize_axis_icon, 
+                hover_color="#DFE5EA"
+            ) 
         
         self.logger.debug(f"Plot autofit state set to: {new_state}")
-        self._update_plot_grid() 
+        self._update_plot_grid()
 
     def _update_plot_grid(self): 
         if not self.plots_canvas or not self.plots_canvas.winfo_exists(): return 
@@ -1103,7 +1248,9 @@ class timsCompareApp:
         return ellipsis + extension 
 
     def _set_status_bar_text(self, full_text: str): 
-        self.status_label_full_text = full_text; self.status_bar_label.configure(text=full_text) 
+        if self.is_loading: return 
+        
+        self.status_label_full_text = full_text; self.status_bar_label.configure(text=full_text)
 
     def _on_tree_motion(self, event: tk.Event): 
         region = self.tree.identify_region(event.x, event.y) 
@@ -1162,62 +1309,89 @@ class timsCompareApp:
             elif r['Type'] == 1: lines.append(f"PASEF,{int(r['CycleId'])},{r['OneOverK0Start']:.4f},{r['OneOverK0End']:.4f},{r['StartMass']:.2f},{r['EndMass']:.2f},-") 
         return "\n".join(lines) 
 
-    def _convert_diagonal_spec_to_parameters(self, diag_params: Dict, seg_params: Dict) -> str: 
-        if not diag_params: return "" 
-        p = diag_params 
+    def _convert_diagonal_spec_to_parameters(self, diag_params: Any, seg_params: Dict) -> str: 
+        if diag_params is None: return "" 
+        
         try: start_im, end_im = float(seg_params.get("calc_im_start", 0)), float(seg_params.get("calc_im_end", 0)) 
         except (ValueError, TypeError): start_im, end_im = 0.0, 0.0 
+        
         lines = ["type, mobility pos.1 [1/K0], mass pos.1 start [m/z], mass pos.1 end [m/z], mobility pos.2 [1/K0], mass pos.2 start [m/z]"] 
-        for _ in range(int(p.get('insert_ms_scan', 0))): lines.append("ms,-,-,-,-,-") 
-        if p.get('slope', 0) == 0: return "" 
-        num, iso_mz = int(p.get('number_of_slices', 0)), p.get('isolation_mz', 0.0) 
-        c_mz1, c_mz2 = (start_im - p['origin']) / p['slope'], (end_im - p['origin']) / p['slope'] 
-        p_start1, p_start2 = c_mz1 - (p['width_mz'] / 2), c_mz2 - (p['width_mz'] / 2) 
-        step = p['width_mz'] / num if num > 0 else 0 
-        for i in range(num): 
-            m1_start, m2_start = p_start1 + i * step, p_start2 + i * step 
-            lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_start + iso_mz:.2f},{end_im:.2f},{m2_start:.2f}") 
-        return "\n".join(lines) 
 
-    def _convert_pasef_polygon_to_text(self, polygon_data: tuple) -> str: 
+        if isinstance(diag_params, pd.DataFrame):
+            if diag_params.empty: return ""
+            
+            for row in diag_params.itertuples():
+                if row.type == 0:
+                     lines.append("ms,-,-,-,-,-") 
+                else:
+                    if row.slope == 0: continue
+                    
+                    half_width = row.isolation_mz / 2
+                    
+                    center_m1 = (start_im - row.origin) / row.slope
+                    m1_start = center_m1 - half_width
+                    m1_end = center_m1 + half_width
+                    
+                    center_m2 = (end_im - row.origin) / row.slope
+                    m2_start = center_m2 - half_width
+                    
+                    lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_end:.2f},{end_im:.2f},{m2_start:.2f}")
+
+        elif isinstance(diag_params, dict):
+            p = diag_params
+            for _ in range(int(p.get('insert_ms_scan', 0))): lines.append("ms,-,-,-,-,-") 
+            
+            if p.get('slope', 0) == 0: return "" 
+            num, iso_mz = int(p.get('number_of_slices', 0)), p.get('isolation_mz', 0.0) 
+            half_iso_width = iso_mz / 2
+            
+            center_m1_first = (start_im - p['origin']) / p['slope'] 
+            center_m2_first = (end_im - p['origin']) / p['slope'] 
+            
+            step = p['width_mz'] / num if num > 0 else 0 
+            
+            for i in range(num): 
+                center_m1 = center_m1_first + (i * step)
+                m1_start = center_m1 - half_iso_width
+                m1_end = center_m1 + half_iso_width
+                
+                center_m2 = center_m2_first + (i * step)
+                m2_start = center_m2 - half_iso_width
+
+                lines.append(f"diagonal,{start_im:.2f},{m1_start:.2f},{m1_end:.2f},{end_im:.2f},{m2_start:.2f}") 
+        
+        return "\n".join(lines)
+
+    def _convert_pasef_polygon_to_text(self, polygon_data: Any) -> str: 
         if not polygon_data: return "" 
-        mass, mobility = polygon_data 
-        return "Mass [m/z],Mobility [1/K0]\n" + "\n".join(f"{m:.4f},{im:.4f}" for m, im in zip(mass, mobility)) 
-
-    def _show_add_menu(self): 
-        self.add_menu.tk_popup(self.add_menu_button.winfo_rootx(), self.add_menu_button.winfo_rooty() + self.add_menu_button.winfo_height()) 
+        
+        polygon_list = polygon_data
+        
+        lines = ["Polygon_ID,Mass [m/z],Mobility [1/K0]"]
+        for i, polygon_points in enumerate(polygon_list):
+            if not polygon_points:
+                continue
+            for (m, im) in polygon_points:
+                lines.append(f"{i},{m:.4f},{im:.4f}")
+        
+        return "\n".join(lines)
 
     def _show_export_menu(self): 
         self.export_menu.tk_popup(self.export_menu_button.winfo_rootx(), self.export_menu_button.winfo_rooty() + self.export_menu_button.winfo_height()) 
 
-    def _open_report_generator_dialog(self): 
-        selected_name = self.remove_var.get() 
-        if not selected_name or selected_name == "-": return messagebox.showwarning("No Selection", "Please select a dataset to export.") 
-        dataset = next((d for d in self.datasets if d.display_name == self.dropdown_name_map.get(selected_name)), None) 
-        if not dataset or not dataset.segments: return 
-
-        from .report_generator_window import ReportGeneratorWindow 
-
-        if self.displayed_params is not None: 
-            initial_params = self.displayed_params 
-        else: #
-            initial_params = self.loader.get_default_parameters_for_dataset(dataset) 
-
-        initial_param_keys = {self._get_param_key(p) for p in initial_params} 
-
-        all_additional_params = [ 
-            p for p in (dataset.default_params + dataset.available_optional_params) 
-            if self._get_param_key(p) not in initial_param_keys 
-        ] 
-
-        ReportGeneratorWindow(
-            master=self.root,
-            dataset=dataset,
-            initial_params=initial_params,
-            all_additional_params=all_additional_params,
-            report_service=self.report_generator,
-            loader_service=self.loader,
-            plotting_service=self.plotter
+    def _open_report_wizard(self):
+        if not self.datasets:
+            messagebox.showinfo("Report", "Please load datasets first.")
+            return
+            
+        initial_params = self.displayed_params if self.displayed_params else None
+            
+        ReportWizard(
+            self.root, 
+            self.datasets, 
+            self.loader, 
+            self.report_generator,
+            initial_params=initial_params
         )
 
     def _load_icons(self): 
@@ -1240,7 +1414,22 @@ class timsCompareApp:
                 size=(49, 20) 
             ) 
             self.manage_views_icon = ctk.CTkImage(Image.open(os.path.join(assets, "manage_views.png")), size=(20, 20))
-            self.resize_axis_icon = ctk.CTkImage(Image.open(os.path.join(assets, "resize_axis.png")), size=(20, 14))
+            resize_img_path = os.path.join(assets, "resize_axis.png")
+            resize_pil = Image.open(resize_img_path)
+            self.resize_axis_icon = ctk.CTkImage(resize_pil, size=(20, 14))
+
+            if resize_pil.mode != 'RGBA':
+                resize_pil = resize_pil.convert('RGBA')
+            
+            r, g, b, a = resize_pil.split()
+            white_bg = Image.new('RGB', resize_pil.size, (255, 255, 255))
+            resize_white = Image.merge('RGBA', (*white_bg.split(), a))
+            
+            self.resize_axis_icon_active = ctk.CTkImage(resize_white, size=(20, 14))
+            self.save_session_icon = ctk.CTkImage(Image.open(os.path.join(assets, "save_session.png")), size=(17, 17))
+            self.remove_all_icon = ctk.CTkImage(Image.open(os.path.join(assets, "remove_all.png")), size=(13, 17))
+            # ------------------------------------------------------------------
+
         except FileNotFoundError as e: print(f"Warning: Could not load icon files. {e}") 
 
     def _toggle_show_differences(self): 
@@ -1265,3 +1454,86 @@ class timsCompareApp:
         except Exception as e:
             self.logger.error("Error opening or handling View Manager dialog.", exc_info=True)
             messagebox.showerror("Error", f"Could not open View Manager:\n{e}")
+    
+    def _save_session_dialog(self):
+        if not self.datasets:
+            messagebox.showwarning("Save Session", "No data loaded to save.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".tcs",
+            filetypes=[("timsCompare Session", "*.tcs"), ("All Files", "*.*")],
+            title="Save Project Session"
+        )
+
+        if not file_path:
+            return
+
+        thread = threading.Thread(target=self._save_session_thread, args=(file_path,))
+        thread.start()
+
+    def _save_session_thread(self, file_path):
+        try:
+            self.is_loading = True
+            self.root.after(0, lambda: self.status_bar_label.configure(text="Saving session..."))
+            self.root.config(cursor="watch")
+            
+            current_view = self.displayed_params if self.displayed_params else self.loader.get_default_parameters_for_view(self.datasets)
+            
+            self.session_service.save_session(file_path, self.datasets, current_view)
+            
+            self.root.after(0, lambda: messagebox.showinfo("Session Saved", f"Session saved successfully to:\n{file_path}"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Save Error", f"Failed to save session:\n{e}"))
+        finally:
+            self.is_loading = False
+            self.root.after(0, lambda: self.root.config(cursor=""))
+            self.root.after(0, lambda: self.status_bar_label.configure(text="Ready"))
+
+    def _load_session_dialog(self):
+        if self.datasets:
+            confirm = messagebox.askyesno("Load Session", "Loading a session will replace the current open files.\nContinue?")
+            if not confirm:
+                return
+
+        file_path = filedialog.askopenfilename(
+            filetypes=[("timsCompare Session", "*.tcs"), ("All Files", "*.*")],
+            title="Open Project Session"
+        )
+
+        if not file_path:
+            return
+
+        thread = threading.Thread(target=self._load_session_thread, args=(file_path,))
+        thread.start()
+
+    def _load_session_thread(self, file_path):
+        try:
+            self.is_loading = True
+            self.root.after(0, lambda: self.status_bar_label.configure(text="Loading session..."))
+            self.root.config(cursor="watch")
+            
+            datasets, view_config = self.session_service.load_session(file_path)
+            
+            self.root.after(0, lambda: self._apply_loaded_session(datasets, view_config))
+            
+        except Exception as e:
+            self.is_loading = False
+            self.root.after(0, lambda: messagebox.showerror("Load Error", f"Failed to load session:\n{e}"))
+            self.root.after(0, lambda: self.root.config(cursor=""))
+            self.root.after(0, lambda: self.status_bar_label.configure(text="Ready"))
+
+    def _apply_loaded_session(self, datasets: List[Dataset], view_config: Optional[List[Dict]]):
+        """Callback to update UI after session load."""
+        self.datasets = datasets
+        self.displayed_params = view_config
+        
+        if self.displayed_params:
+             for ds in self.datasets:
+                 self.loader.parse_additional_parameters(ds, self.displayed_params)
+
+        self._redraw_ui()
+        
+        self.is_loading = False
+        self.root.config(cursor="")
+        self.status_bar_label.configure(text=f"Session loaded: {len(datasets)} files.")
