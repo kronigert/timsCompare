@@ -118,5 +118,3 @@ timsCompare is an independent, third-party tool and is not an official Bruker pr
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
-<meta name="google-site-verification" content="H4eFJCaLTDwXQKmoWV2bDGarICw4FI8hMJI8qFPvQl0" />
