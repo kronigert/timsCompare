@@ -9,21 +9,24 @@ from PIL import Image, ImageTk
 import sys
 import ctypes
 
-log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+from utils import resource_path
+from app_config import AppConfig
+from services import DataLoaderService, PlottingService, ReportGeneratorService, SessionService # <--- Added SessionService
+from ui.main_window import timsCompareApp
+from logger_setup import setup_logging
+from settings import LOGGING_ENABLED
+
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(log_formatter)
 early_logger = logging.getLogger()
 early_logger.addHandler(console_handler)
 early_logger.setLevel(logging.DEBUG)
 
-early_logger.info(">>> main.py: Starting execution <<<")
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
-from utils import resource_path
-from app_config import AppConfig
-from services import DataLoaderService, PlottingService, ReportGeneratorService
-from ui.main_window import timsCompareApp
-from logger_setup import setup_logging
-from settings import LOGGING_ENABLED
+early_logger.info(">>> main.py: Starting execution <<<")
 
 early_logger.debug(">>> main.py: Imports successful <<<")
 
@@ -87,9 +90,10 @@ if __name__ == "__main__":
     data_loader = DataLoaderService(config)
     plot_service = PlottingService()
     report_generator = ReportGeneratorService(plot_service, config, data_loader)
+    session_service = SessionService(data_loader)
         
     logger.debug(">>> main.py: Creating timsCompareApp instance <<<")
-    app = timsCompareApp(root, config, data_loader, plot_service, report_generator)
+    app = timsCompareApp(root, config, data_loader, plot_service, report_generator, session_service)
     app.root.title("timsCompare")
     
     try:

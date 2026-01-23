@@ -8,34 +8,37 @@ import io
 import logging
 import pandas as pd
 import numpy as np
+import csv 
+import gzip 
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.patches as patches
 
 from PIL import Image
 import customtkinter as ctk
 from typing import Optional, Any, List, Dict, Tuple, Callable
+from collections import defaultdict
 from fpdf import FPDF
 import tempfile
 
-from settings import ENABLE_DEBUG_LOGGING 
-from app_config import AppConfig 
+from settings import ENABLE_DEBUG_LOGGING
+from app_config import AppConfig, CALCULATED_PARAMETERS 
 from data_model import Dataset, Segment 
 from utils import format_parameter_value, resource_path 
 
-INSTRUMENT_KEY_MAP = {
-    "UNKNOWN_PRO_KEY": "timsTOF Pro",
-    "0x3021": "timsTOF PRO 2",
-    "0x7823": "timsTOF SCP",
-    "0x3843": "timsTOF Ultra",
-    "0x3846": "timsTOF Ultra 2",
-    "0x7846": "timsUltra AIP",
-    "0x3044": "timsTOF HT",
-    "0x3002": "timsTOF fleX",
-    "0x7022": "timsMetabo"
-}
+AIP_RAW_DEPENDENCIES = [
+    "FocusPreTOF_AIP_Lens1_StorageBaseTime_Set",
+    "FocusPreTOF_AIP_Lens1_StorageBaseTime_MSMS_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_Start_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_End_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Start_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_End_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_Start_MSMS_Set",
+    "FocusPreTOF_AIP_Delay_Time_Ramp_End_MSMS_Set"
+]
 
 class DataProcessingError(Exception): 
     pass
@@ -46,15 +49,35 @@ class UnsupportedScanModeError(DataProcessingError):
 class ParsingError(DataProcessingError): 
     pass
 
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 class DataLoaderService: 
-    def __init__(self, config: AppConfig): 
+    def __init__(self, config: AppConfig):      
         self.config = config 
         self._find_cache = {} 
-        self.logger = logging.getLogger(__name__) 
-
-    def get_default_parameters_for_dataset(self, dataset: Dataset) -> List[Dict]: 
-        return self.get_default_parameters_for_view([dataset]) 
+        self.logger = logging.getLogger(__name__)
+    
+    def _get_all_parameters_to_parse(self, dataset: Dataset) -> List[str]:
+        params_to_load = set()
+        
+        for wf_list in self.config.parameter_definitions.values():
+            params_to_load.update(wf_list)
+            
+        params_to_load.update(AIP_RAW_DEPENDENCIES)
+        
+        if dataset.default_params:
+            for p in dataset.default_params:
+                if 'permname' in p: params_to_load.add(p['permname'])
+                
+        return list(params_to_load)
 
     def get_default_parameters_for_view(self, datasets: List[Dataset]) -> List[Dict]:
         if not datasets:
@@ -67,6 +90,16 @@ class DataLoaderService:
         has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for ds in datasets for s in ds.segments)
         has_msms_stepping = any(s.parameters.get("Ims_Stepping_Active") == '1' for ds in datasets for s in ds.segments)
 
+        has_aip_active = False
+        for ds in datasets:
+            for s in ds.segments:
+                val = s.parameters.get("FocusPreTOF_AIP_Switch_Set")
+                if str(val) == '1':
+                    has_aip_active = True
+                    self.logger.debug(f"View Manager: Found AIP Active in {ds.display_name}")
+                    break
+            if has_aip_active: break
+        
         all_workflows_in_dataset = {s.workflow_name for ds in datasets for s in ds.segments if s.workflow_name}
         default_params_by_workflow = self.config.parameter_definitions
 
@@ -83,12 +116,12 @@ class DataLoaderService:
         add_unique(default_params_by_workflow.get('__GENERAL__', []))
         for wf in sorted(list(all_workflows_in_dataset)):
             add_unique(default_params_by_workflow.get(wf, []))
-
+            
         if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames:
             if "Mode_ScanMode" in default_permnames_ordered:
                  default_permnames_ordered.remove("Mode_ScanMode")
 
-        all_definitions_map = {p['permname']: p for p in self.config.all_definitions}
+        all_definitions_map = self.config.parameter_config_map
         default_param_configs = []
 
         for pname in default_permnames_ordered:
@@ -97,7 +130,7 @@ class DataLoaderService:
             if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue
             if pname == 'IMSICC_Target' and not has_icc_mode1: continue
             if pname == 'calc_msms_stepping_display_list' and not has_msms_stepping: continue
-
+            
             mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"]
             if pname in mode2_params and not has_icc_mode2: continue
 
@@ -105,43 +138,25 @@ class DataLoaderService:
 
             if not param_config:
                 if pname.startswith("calc_"):
-                    calc_param_details = {
-                        "calc_scan_area_mz": ("Window Scan Area", "Calculated Parameters"),
-                        "calc_ramps": ("Ramps per Cycle", "Calculated Parameters"),
-                        "calc_ms1_scans": ("MS1 Scans per Cycle", "Calculated Parameters"),
-                        "calc_steps": ("Isolation Steps per Cycle", "Calculated Parameters"),
-                        "calc_mz_width": ("Isolation Window Width", "Calculated Parameters"),
-                        "calc_ce_ramping_start": ("CE Ramping Start", "Calculated Parameters"),
-                        "calc_ce_ramping_end": ("CE Ramping End", "Calculated Parameters"),
-                        "calc_msms_stepping_display_list": ("MS/MS Stepping Details", "TIMS"),
-                        "calc_scan_mode": ("Scan Mode", "Mode"), 
-                        "calc_segment_start_time": ("Segment Start", "Mode"),
-                        "calc_segment_end_time": ("Segment End", "Mode"),
-                        "calc_instrument_model": ("Instrument", "General"), 
-                        "calc_tims_control_version": ("timsControl Version", "General"),
-                        "calc_last_modified_date": ("Last Modified", "General")
-                    }
-                    if pname in calc_param_details:
-                         label, category = calc_param_details[pname]
-                         param_config = {"permname": pname, "label": label, "category": category}
+                    if pname in CALCULATED_PARAMETERS:
+                         details = CALCULATED_PARAMETERS[pname]
+                         param_config = {"permname": pname, "label": details['label'], "category": details['category']}
                     else:
                          label = pname.replace("calc_", "").replace("_", " ").title()
                          category = "Calculated Parameters"
                          param_config = {"permname": pname, "label": label, "category": category}
-
                 else:
                     self.logger.warning(f"Parameter '{pname}' requested in default view but not found in definitions.")
                     param_config = {
                         "permname": pname,
                         "label": pname.replace("_", " "),
                         "category": "General" 
-                    }
+                    }   
 
             if param_config:
                 default_param_configs.append(param_config)
 
         final_params = [p for p in default_param_configs if p.get('permname') != 'Calibration_MarkSegment']
-
         return final_params
 
     def _discover_available_parameters(self, xml_root: ET.Element) -> Tuple[List[Dict], List[Dict]]: 
@@ -187,130 +202,95 @@ class DataLoaderService:
 
         dataset.method_file_path = method_file
         try:
-            tree = ET.parse(method_file, parser=ET.XMLParser(encoding="iso-8859-1"))
-            root = tree.getroot()
-            dataset.xml_root = root
-        except ET.ParseError as e:
+            with open(method_file, 'r', encoding="iso-8859-1") as f:
+                dataset.xml_content = f.read()
+            
+            dataset.xml_root = ET.fromstring(dataset.xml_content)
+            
+        except (ET.ParseError, IOError) as e:
             error_msg = f"Failed to parse XML in {os.path.basename(method_file)}: {e}"
             self.logger.error(error_msg, exc_info=True)
             raise ParsingError(error_msg)
 
-        general_info_element = root.find('./generalinfo')
+        general_info_element = dataset.xml_root.find('./generalinfo')
+        
         if general_info_element is not None:
             config_element = general_info_element.find('configuration')
             found_model = None
             base_appx_key_at_idx2 = None
+            instrument_map = self.config.instrument_key_map
 
             if config_element is not None and config_element.text:
                 config_parts = config_element.text.split()
-
                 if len(config_parts) >= 3:
                     base_appx_key_at_idx2 = config_parts[2]
-                    if base_appx_key_at_idx2 in INSTRUMENT_KEY_MAP:
-                        found_model = INSTRUMENT_KEY_MAP[base_appx_key_at_idx2]
-                        self.logger.debug(f"Found model via appx_key at index 2 '{base_appx_key_at_idx2}': {found_model}")
-
+                    if base_appx_key_at_idx2 in instrument_map:
+                        found_model = instrument_map[base_appx_key_at_idx2]
+                
                 if found_model is None:
-                    self.logger.debug(f"Appx_key at index 2 ('{base_appx_key_at_idx2}') not found/valid. Scanning entire config string for a known key.")
-                    known_keys = set(INSTRUMENT_KEY_MAP.keys())
+                    known_keys = set(instrument_map.keys())
                     for part in config_parts:
                         if part in known_keys:
-                            found_model = INSTRUMENT_KEY_MAP[part]
-                            self.logger.debug(f"Found model via key scan (key '{part}' found anywhere): {found_model}")
-                            break
+                            found_model = instrument_map[part]; break
 
                 if found_model is None:
-                    self.logger.debug(f"No known key found. Scanning config string for an *exact* model name match (case-insensitive, ignores leading '_').")
-                    known_model_names_map = {name.lower().replace(" ", "_"): name for name in INSTRUMENT_KEY_MAP.values()}
-
+                    known_model_names_map = {name.lower().replace(" ", "_"): name for name in instrument_map.values()}
                     for part in config_parts:
-                        part_normalized_lower = part.lstrip('_').lower() 
+                        part_normalized = part.lstrip('_').lower() 
+                        if part_normalized in known_model_names_map:
+                            found_model = known_model_names_map[part_normalized]; break 
 
-                        if part_normalized_lower in known_model_names_map:
-                            found_model = known_model_names_map[part_normalized_lower]
-                            self.logger.debug(f"Found model via *exact* name match ('{part}' -> '{part_normalized_lower}'): {found_model}")
-                            break 
-
-            if found_model:
-                dataset.instrument_model = found_model
-            else:
-                self.logger.warning(f"Could not determine instrument model from key or name scan. Key at index 2 was '{base_appx_key_at_idx2}'. Defaulting to 'Unknown'.")
-                dataset.instrument_model = "Unknown"
-
+            dataset.instrument_model = found_model if found_model else "Unknown"
+            
             version_element = general_info_element.find('modified-by-timstof')
-            if version_element is not None and version_element.text:
-                dataset.tims_control_version = version_element.text.strip()
-            else:
-                 self.logger.warning("Could not find <modified-by-timstof> tag.")
-
+            if version_element is not None and version_element.text: dataset.tims_control_version = version_element.text.strip()
+            
             date_element = general_info_element.find('modified-by-timstof-on')
-            if date_element is not None and date_element.text:
-                dataset.last_modified_date = date_element.text.strip()
-            else:
-                 self.logger.warning("Could not find <modified-by-timstof-on> tag.")
+            if date_element is not None and date_element.text: dataset.last_modified_date = date_element.text.strip()
         else:
-            self.logger.warning("Could not find <generalinfo> section in the method file.")
             dataset.instrument_model = "Unknown"
 
-        dataset.available_sources = self._discover_available_sources(root)
-        self.logger.debug(f"Discovered {len(dataset.available_sources)} ion sources in method: {dataset.available_sources}")
-
-        default_params, optional_params = self._discover_available_parameters(root)
+        dataset.available_sources = self._discover_available_sources(dataset.xml_root)
+        default_params, optional_params = self._discover_available_parameters(dataset.xml_root)
         dataset.default_params = default_params
         dataset.available_optional_params = optional_params
 
-        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        all_defs_map = self.config.parameter_config_map
         scan_mode_map = all_defs_map.get("Mode_ScanMode", {}).get("value_map", {})
         polarity_map = all_defs_map.get("Mode_IonPolarity", {}).get("value_map", {})
-        segment_elements = root.findall('./method/qtofimpactemacq/timetable/segment')
-        instrument_element = root.find('instrument')
+
+        segment_elements = dataset.xml_root.findall('./method/qtofimpactemacq/timetable/segment')
+        instrument_element = dataset.xml_root.find('instrument')
+        method_element = dataset.xml_root.find('method')
 
         if not segment_elements:
             new_segment = Segment(start_time=0.0, end_time=-1.0)
             new_segment.end_time_display = "N/A"
-            method_element = root.find('method')
-            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.")
+            if method_element is None: raise ParsingError("Could not find the <method> tag.")
             
             self._parse_and_populate_segment(new_segment, method_element, method_element, instrument_element, scan_mode_map, polarity_map, folder_path, {})
             dataset.segments.append(new_segment)
         else:
             last_end_time = 0.0
-
-            method_element = root.find('method')
-            if method_element is None: raise ParsingError("Could not find the <method> tag in the file.")
+            if method_element is None: raise ParsingError("Could not find the <method> tag.")
 
             global_polarity_el = method_element.find(f".//*[@permname='Mode_IonPolarity']")
             global_polarity_val = self._get_value_from_element(global_polarity_el, {}) or '0'
             global_polarity_str = polarity_map.get(str(global_polarity_val))
 
-            base_params = self._parse_parameters_for_scope(
-                instrument_element, 
-                instrument_element, 
-                self.config.all_definitions,
-                None 
-            )
-
-            method_params = self._parse_parameters_for_scope(
-                method_element, 
-                instrument_element, 
-                self.config.all_definitions,
-                global_polarity_str
-            )
+            base_params = self._parse_parameters_for_scope(instrument_element, instrument_element, self.config.all_definitions, None)
+            method_params = self._parse_parameters_for_scope(method_element, instrument_element, self.config.all_definitions, global_polarity_str)
             base_params.update(method_params)
             last_segment_params = base_params
 
             for seg_element in segment_elements:
                 end_time_str = seg_element.attrib.get("endtime", "-1")
-                try:
-                    end_time = float(end_time_str)
-                except ValueError:
-                    end_time = -1.0
+                try: end_time = float(end_time_str)
+                except ValueError: end_time = -1.0
 
                 new_segment = Segment(start_time=last_end_time, end_time=end_time)
-
-                if end_time < 0:
-                    new_segment.end_time_display = "Open End"
-
+                if end_time < 0: new_segment.end_time_display = "Open End"
+                
                 new_segment.xml_scope_element = seg_element
 
                 unfiltered_params_for_next_segment = self._parse_and_populate_segment(
@@ -318,13 +298,10 @@ class DataLoaderService:
                     scan_mode_map, polarity_map, folder_path, last_segment_params
                 )
                 dataset.segments.append(new_segment)
-
-                if end_time >= 0:
-                    last_end_time = end_time
-
+                if end_time >= 0: last_end_time = end_time
                 last_segment_params = unfiltered_params_for_next_segment
 
-        self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully with {len(dataset.segments)} segment(s).")
+        self.logger.info(f"Dataset '{dataset.display_name}' loaded successfully.")
 
         if ENABLE_DEBUG_LOGGING:
             known_permnames_set = {p['permname'] for p in self.config.all_definitions}
@@ -343,6 +320,30 @@ class DataLoaderService:
             self.logger.debug("-------------------------------------------------")
 
         return dataset
+    
+    def restore_xml_structure(self, dataset: Dataset):
+        if not dataset.xml_content:
+            self.logger.warning(f"No XML content found for {dataset.display_name}, cannot restore parameter context.")
+            return
+
+        try:
+            dataset.xml_root = ET.fromstring(dataset.xml_content)
+            
+            segment_elements = dataset.xml_root.findall('./method/qtofimpactemacq/timetable/segment')
+            
+            if not segment_elements and len(dataset.segments) == 1:
+                dataset.segments[0].xml_scope_element = dataset.xml_root.find('method')
+                return
+
+            if len(segment_elements) == len(dataset.segments):
+                for i, seg in enumerate(dataset.segments):
+                    seg.xml_scope_element = segment_elements[i]
+            else:
+                self.logger.warning(f"Mismatch in segment count during restoration for {dataset.display_name}. "
+                                    f"XML has {len(segment_elements)}, Dataset has {len(dataset.segments)}.")
+        
+        except ET.ParseError as e:
+            self.logger.error(f"Failed to restore XML structure for {dataset.display_name}: {e}")
 
     def _parse_and_populate_segment(self, new_segment: Segment, 
                                      segment_scope_element: ET.Element, 
@@ -384,7 +385,7 @@ class DataLoaderService:
         )
         unfiltered_params.update(segment_values) 
         
-        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        all_defs_map = self.config.parameter_config_map
         ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
         
         for permname, value in list(unfiltered_params.items()):
@@ -450,13 +451,56 @@ class DataLoaderService:
 
         self._calculate_energy_ramping_params(segment)
         self._calculate_msms_stepping_params(segment)
+        self._calculate_aip_profile_params(segment)
+        self._calculate_aip_storage_times(segment) 
         
-        if segment.scan_mode_id == 6: # PASEF
+        if segment.scan_mode_id == 6: 
             self._process_pasef_data(segment) 
-        elif segment.scan_mode_id == 9: # dia-PASEF
+        elif segment.scan_mode_id == 9: 
             self._process_dia_pasef_data(segment, folder_path) 
-        elif segment.scan_mode_id == 11: # diagonal-PASEF
-            self._process_diagonal_pasef_data(segment, folder_path) 
+        elif segment.scan_mode_id == 11: 
+            self._process_diagonal_pasef_data(segment, folder_path)
+    
+    def _calculate_aip_storage_times(self, segment: Segment):
+        def get_val(key): 
+            try: return float(segment.parameters.get(key, 0.0))
+            except (ValueError, TypeError): return 0.0
+
+        switch_ms = segment.parameters.get("FocusPreTOF_AIP_Delay_Time_Ramp_Switch_Set")
+        
+        if str(switch_ms) == '0':
+            val = get_val("FocusPreTOF_AIP_Lens1_StorageBaseTime_Set")
+            segment.parameters["calc_aip_storage_time_ms"] = f"{val:.1f} µs"
+        elif str(switch_ms) == '1':
+            mob_start = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_Start_Set")
+            mob_end = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_End_Set")
+            time_start = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Start_Set")
+            time_end = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_End_Set")
+            
+            segment.parameters["calc_aip_storage_time_ms"] = [
+                f"{time_start:.1f} µs @ {mob_start:.2f} V·s/cm²",
+                f"{time_end:.1f} µs @ {mob_end:.2f} V·s/cm²"
+            ]
+        else:
+             segment.parameters["calc_aip_storage_time_ms"] = None
+
+        switch_msms = segment.parameters.get("FocusPreTOF_AIP_Delay_Time_Ramp_Switch_MSMS_Set")
+
+        if str(switch_msms) == '0':
+            val = get_val("FocusPreTOF_AIP_Lens1_StorageBaseTime_MSMS_Set")
+            segment.parameters["calc_aip_storage_time_msms"] = f"{val:.1f} µs"
+        elif str(switch_msms) == '1':
+            mob_start = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_Start_Set") 
+            mob_end = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Mobility_End_Set")     
+            time_start = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_Start_MSMS_Set")
+            time_end = get_val("FocusPreTOF_AIP_Delay_Time_Ramp_End_MSMS_Set")
+            
+            segment.parameters["calc_aip_storage_time_msms"] = [
+                f"{time_start:.1f} µs @ {mob_start:.2f} V·s/cm²",
+                f"{time_end:.1f} µs @ {mob_end:.2f} V·s/cm²"
+            ]
+        else:
+             segment.parameters["calc_aip_storage_time_msms"] = None
 
     def _apply_conditional_logic(self, segment: Segment): 
         duty_cycle_lock = segment.parameters.get("IMS_imeX_DutyCycleLock") 
@@ -466,13 +510,9 @@ class DataLoaderService:
                 segment.parameters["IMS_imeX_AccumulationTime"] = ramp_time_value 
 
         icc_mode = segment.parameters.get("IMSICC_Mode")
+        
         if icc_mode and icc_mode != '0':
-            if "IMS_imeX_AccumulationTime" in segment.parameters:
-                segment.parameters["IMS_imeX_AccumulationTime"] = "variable"
-            if "IMS_imeX_DutyCycleLock" in segment.parameters:
-                segment.parameters["IMS_imeX_DutyCycleLock"] = "variable"
-            if "calc_cycle_time" in segment.parameters:
-                segment.parameters["calc_cycle_time"] = "variable"
+            segment.parameters["IMS_imeX_AccumulationTime"] = "variable"
 
     def _get_value_from_element(self, element: Optional[ET.Element], config: Dict) -> Optional[Any]: 
         if element is None: 
@@ -497,7 +537,7 @@ class DataLoaderService:
                                      ion_polarity: Optional[str], 
                                      ion_source: Optional[str] = None) -> Dict:
         results = {}
-        all_param_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        all_param_defs_map = self.config.parameter_config_map
         ime_x_mode_to_index = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4}
 
         def find_and_get_value(p_config: Dict, current_results: Dict) -> Optional[Any]:
@@ -601,10 +641,10 @@ class DataLoaderService:
         is_advanced = (is_advanced_str == '1') 
         segment.parameters["calc_advanced_ce_ramping_display_list"] = None 
 
-        if not is_advanced: 
-            all_defs_map = {p['permname']: p for p in self.config.all_definitions} 
+        if not is_advanced:
+            all_defs_map = self.config.parameter_config_map
             ce_config = all_defs_map.get("Energy_Ramping_Collision_Energy_StartEnd", {}) 
-            mobility_config = all_defs_map.get("Energy_Ramping_Mobility_StartEnd", {}) 
+            mobility_config = all_defs_map.get("Energy_Ramping_Mobility_StartEnd", {})
             
             ce_values = segment.parameters.get("Energy_Ramping_Collision_Energy_StartEnd") 
             mobility_values = segment.parameters.get("Energy_Ramping_Mobility_StartEnd") 
@@ -672,7 +712,7 @@ class DataLoaderService:
             return
 
         stepping_details = []
-        all_defs_map = {p['permname']: p for p in self.config.all_definitions}
+        all_defs_map = self.config.parameter_config_map
 
         ce_step1 = segment.parameters.get("Energy_Ramping_Collision_Energy_StartEnd")
         ce_step2 = segment.parameters.get("Energy_Ramping_Collision_Energy_StartEnd_Tims_Step_2")
@@ -712,21 +752,100 @@ class DataLoaderService:
             segment.parameters['calc_msms_stepping_display_list'] = stepping_details
         else:
             segment.parameters['calc_msms_stepping_display_list'] = None
+    
+    def _calculate_aip_profile_params(self, segment: Segment):
+        aip_switch = segment.parameters.get("FocusPreTOF_AIP_Switch_Set")
+        
+        if str(aip_switch) != '1':
+            segment.parameters["calc_aip_lens1_profile_ms_display_list"] = None
+            segment.parameters["calc_aip_lens1_profile_msms_display_list"] = None
+            return
+
+        def to_list(val):
+            if isinstance(val, list): return val
+            if val is None: return []
+            return [val]
+
+        def build_profile_list(len_key, volt_key, inc_key):
+            lengths = to_list(segment.parameters.get(len_key))
+            voltages = to_list(segment.parameters.get(volt_key))
+            increments = to_list(segment.parameters.get(inc_key))
+            
+            result_list = []
+            
+            header = "Δt [µs] | Vstart [Vpp] | Slope [V/µs]"
+            result_list.append(header)
+            
+            if lengths and voltages:
+                if not increments: 
+                    increments = ['0'] * len(lengths)
+
+                count = min(len(lengths), len(voltages))
+                for i in range(count):
+                    try:
+                        v_val = float(voltages[i])
+                        l_raw = float(lengths[i])
+                        l_val = l_raw / 10.0
+                        
+                        inc_val = 0.0
+                        if i < len(increments):
+                            try: inc_val = float(increments[i]) * 10.0
+                            except: inc_val = 0.0
+
+                        row_str = (f"{l_val:.1f} | "
+                                   f"{v_val:.1f} | "
+                                   f"{inc_val:.4f}")
+                        
+                        result_list.append(row_str)
+                    except (ValueError, TypeError) as e:
+                        continue
+                        
+            if len(result_list) == 1:
+                return []
+                
+            return result_list
+
+        ms_list = build_profile_list(
+            "FocusPreTOF_AIP_Lens1_Ramp_Length_Set", 
+            "FocusPreTOF_AIP_Lens1_Ramp_Voltages_Set", 
+            "FocusPreTOF_AIP_Lens1_Ramp_Increments_Set"
+        )
+        
+        msms_list = build_profile_list(
+            "FocusPreTOF_AIP_Lens1_Ramp_Length_MSMS_Set", 
+            "FocusPreTOF_AIP_Lens1_Ramp_Voltages_MSMS_Set", 
+            "FocusPreTOF_AIP_Lens1_Ramp_Increments_MSMS_Set"
+        )
+
+        segment.parameters["calc_aip_lens1_profile_ms_display_list"] = ms_list if ms_list else ["No Data"]
+        segment.parameters["calc_aip_lens1_profile_msms_display_list"] = msms_list if msms_list else ["No Data"]
 
     def _process_pasef_data(self, segment: Segment): 
         mass_values_str = segment.parameters.get("IMS_PolygonFilter_Mass") 
         mobility_values_str = segment.parameters.get("IMS_PolygonFilter_Mobility") 
+        id_values_str = segment.parameters.get("IMS_PolygonFilter_Id")
         
         segment.pasef_polygon_data = None 
 
-        if mass_values_str is not None and mobility_values_str is not None: 
+        if mass_values_str is not None and mobility_values_str is not None and id_values_str is not None: 
             try: 
                 mass_values = [float(v) for v in mass_values_str if v is not None] 
                 mobility_values = [float(v) for v in mobility_values_str if v is not None] 
-                if mass_values and mobility_values: 
-                    segment.pasef_polygon_data = (mass_values, mobility_values) 
-            except (TypeError, ValueError): 
-                segment.pasef_polygon_data = None 
+                id_values = [int(v) for v in id_values_str if v is not None]
+
+                if not (len(mass_values) == len(mobility_values) == len(id_values)):
+                    self.logger.warning("PASEF polygon coordinate lists (Mass, Mobility, Id) have mismatching lengths. Skipping plot.")
+                    return
+
+                polygons = defaultdict(list)
+                for mz, im, poly_id in zip(mass_values, mobility_values, id_values):
+                    polygons[poly_id].append((mz, im))
+                
+                segment.pasef_polygon_data = [polygons[key] for key in sorted(polygons.keys())]
+
+            except (TypeError, ValueError) as e: 
+                self.logger.error(f"Error parsing PASEF polygon data: {e}")
+                segment.pasef_polygon_data = None
         
         try: 
             num_ramps = int(segment.parameters.get("MSMS_Pasef_NumRampsPerCycle") or 0) 
@@ -736,7 +855,7 @@ class DataLoaderService:
             cycle_time_s = total_scans * (ramp_time + quench_time) / 1000 
             segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s" 
         except (ValueError, TypeError): 
-            segment.parameters["calc_cycle_time"] = "N/A" 
+            segment.parameters["calc_cycle_time"] = "N/A"
             
     def _process_dia_pasef_data(self, segment: Segment, search_path: str): 
         sqlite_file = self._find_file(search_path, ["diasettings.diasqlite"]) 
@@ -813,11 +932,101 @@ class DataLoaderService:
     def _process_diagonal_pasef_data(self, segment: Segment, search_path: str): 
         sqlite_file = self._find_file(search_path, ["synchroSettings.syncsqlite"]) 
         if not sqlite_file: return 
+        
+        diag_df = pd.DataFrame()
+        table_found = None
+        conn = None
+        
         try: 
             conn = sqlite3.connect(f'file:{sqlite_file}?mode=ro', uri=True) 
-            diag_df = pd.read_sql_query("SELECT * FROM Template", conn) 
+            
+            try:
+                diag_df = pd.read_sql_query("SELECT * FROM Slices", conn)
+                if not diag_df.empty:
+                    table_found = "Slices"
+                    self.logger.debug("Found and loaded 'Slices' table.")
+            except Exception:
+                self.logger.debug("'Slices' table not found, trying 'Template' table.")
+            
+            if table_found is None:
+                try:
+                    diag_df = pd.read_sql_query("SELECT * FROM Template", conn)
+                    if not diag_df.empty:
+                        table_found = "Template"
+                        self.logger.debug("Found and loaded 'Template' table.")
+                except Exception: 
+                    self.logger.debug("'Template' table also not found.")
+            
             conn.close() 
-            if not diag_df.empty: 
+            conn = None
+
+            if table_found is None or diag_df.empty:
+                self.logger.debug("No 'Slices' or 'Template' table found in synchroSettings.syncsqlite.")
+                return
+
+            start_im, end_im = None, None 
+            try: 
+                start_im = float(segment.parameters.get("IMS_imeX_RampStart")) 
+                end_im = float(segment.parameters.get("IMS_imeX_RampEnd")) 
+                segment.parameters["calc_scan_area_im"] = f"{start_im:.2f} - {end_im:.2f}" 
+                segment.parameters["calc_im_start"], segment.parameters["calc_im_end"] = start_im, end_im 
+            except (ValueError, TypeError, AttributeError): 
+                segment.parameters["calc_scan_area_im"] = "N/A" 
+
+            if table_found == "Slices":
+                segment.diagonal_pasef_data = diag_df
+                
+                ms1_scans_df = diag_df[diag_df['type'] == 0]
+                pasef_slices_df = diag_df[diag_df['type'] != 0].copy() 
+                
+                ms1_scans = int(len(ms1_scans_df))
+                num_ramps = int(len(pasef_slices_df))
+
+                segment.parameters["calc_ms1_scans"] = ms1_scans 
+                segment.parameters["calc_ramps"] = num_ramps 
+
+                unique_widths = pasef_slices_df['isolation_mz'].nunique()
+                if unique_widths == 0:
+                     segment.parameters["calc_mz_width"] = "N/A"
+                elif unique_widths == 1:
+                     segment.parameters["calc_mz_width"] = f"static ({pasef_slices_df['isolation_mz'].iloc[0]:.1f})"
+                else:
+                     segment.parameters["calc_mz_width"] = "variable"
+                
+                if start_im is not None and end_im is not None and not pasef_slices_df.empty:
+                    try:
+                        all_mz_starts = []
+                        all_mz_ends = []
+                        for row in pasef_slices_df.itertuples():
+                            if row.slope == 0: continue
+                            
+                            half_width = row.isolation_mz / 2
+                            
+                            center_mz_bottom = (start_im - row.origin) / row.slope
+                            start_mz_bottom = center_mz_bottom - half_width
+                            end_mz_bottom = center_mz_bottom + half_width
+                            
+                            center_mz_top = (end_im - row.origin) / row.slope
+                            start_mz_top = center_mz_top - half_width
+                            end_mz_top = center_mz_top + half_width
+                            
+                            all_mz_starts.extend([start_mz_bottom, start_mz_top])
+                            all_mz_ends.extend([end_mz_bottom, end_mz_top])
+
+                        if all_mz_starts and all_mz_ends:
+                            min_mz = min(all_mz_starts)
+                            max_mz = max(all_mz_ends)
+                            segment.parameters["calc_scan_area_mz"] = f"{min_mz:.2f} m/z - {max_mz:.2f} m/z"
+                        else:
+                            segment.parameters["calc_scan_area_mz"] = "N/A"
+                            
+                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
+                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z from 'Slices': %s", e) 
+                        segment.parameters["calc_scan_area_mz"] = "N/A"
+                else:
+                    segment.parameters["calc_scan_area_mz"] = "N/A"
+
+            elif table_found == "Template":
                 p = diag_df.iloc[0].to_dict() 
                 segment.diagonal_pasef_data = p 
                 ms1_scans = int(p.get('insert_ms_scan', 0)) 
@@ -826,43 +1035,59 @@ class DataLoaderService:
                 segment.parameters["calc_ms1_scans"] = ms1_scans 
                 segment.parameters["calc_ramps"] = num_ramps 
                 segment.parameters["calc_mz_width"] = f"{isolation_mz:.1f}" 
-                start_im, end_im = None, None 
-                try: 
-                    start_im = float(segment.parameters.get("IMS_imeX_RampStart")) 
-                    end_im = float(segment.parameters.get("IMS_imeX_RampEnd")) 
-                    segment.parameters["calc_scan_area_im"] = f"{start_im:.2f} - {end_im:.2f}" 
-                    segment.parameters["calc_im_start"], segment.parameters["calc_im_end"] = start_im, end_im 
-                except (ValueError, TypeError, AttributeError): 
-                    segment.parameters["calc_scan_area_im"] = "N/A" 
+                        
                 if start_im is not None and end_im is not None: 
                     try: 
                         if p.get('slope') is None or p.get('origin') is None or p.get('width_mz') is None: 
                             raise ValueError("Missing required diagonal-PASEF parameters (slope, origin, or width_mz).") 
                         if p['slope'] == 0: raise ZeroDivisionError("Slope cannot be zero.") 
                         
-                        center_mz1 = (start_im - p['origin']) / p['slope'] 
-                        center_mz2 = (end_im - p['origin']) / p['slope'] 
-                        pattern_start1 = center_mz1 - (p['width_mz'] / 2) 
-                        pattern_start2 = center_mz2 - (p['width_mz'] / 2) 
-                        step = p['width_mz'] / num_ramps if num_ramps > 0 else 0 
-                        mz_start_first_slice = pattern_start1 
-                        mz_start_last_slice = pattern_start2 + ((num_ramps - 1) * step) 
-                        mz_end_last_slice = mz_start_last_slice + isolation_mz 
-                        segment.parameters["calc_scan_area_mz"] = f"{mz_start_first_slice:.2f} m/z - {mz_end_last_slice:.2f} m/z" 
-                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
-                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z: %s", e) 
-                        segment.parameters["calc_scan_area_mz"] = "N/A"     
+                        half_iso_width = isolation_mz / 2
+                        step_mz = p['width_mz'] / num_ramps if num_ramps > 0 else 0 
+
+                        center_mz1_first = (start_im - p['origin']) / p['slope'] 
+                        center_mz2_first = (end_im - p['origin']) / p['slope'] 
                         
-                try: 
-                    ramp_time_ms = float(segment.parameters.get("IMS_imeX_RampTime") or 0) 
-                    quench_time = float(segment.parameters.get("Collision_QuenchTime_Set") or 0) 
-                    total_scans = ms1_scans + num_ramps 
+                        start_mz1_first = center_mz1_first - half_iso_width
+                        end_mz1_first = center_mz1_first + half_iso_width
+                        start_mz2_first = center_mz2_first - half_iso_width
+                        end_mz2_first = center_mz2_first + half_iso_width
+
+                        center_mz1_last = center_mz1_first + ((num_ramps - 1) * step_mz)
+                        center_mz2_last = center_mz2_first + ((num_ramps - 1) * step_mz)
+
+                        start_mz1_last = center_mz1_last - half_iso_width
+                        end_mz1_last = center_mz1_last + half_iso_width
+                        start_mz2_last = center_mz2_last - half_iso_width
+                        end_mz2_last = center_mz2_last + half_iso_width
+
+                        min_mz = min(start_mz1_first, start_mz2_first, start_mz1_last, start_mz2_last)
+                        max_mz = max(end_mz1_first, end_mz2_first, end_mz1_last, end_mz2_last)
+
+                        segment.parameters["calc_scan_area_mz"] = f"{min_mz:.2f} m/z - {max_mz:.2f} m/z" 
+                    except (ValueError, TypeError, ZeroDivisionError, AttributeError, KeyError) as e: 
+                        self.logger.debug("Could not calculate diagonal-PASEF scan area m/z from 'Template': %s", e) 
+                        segment.parameters["calc_scan_area_mz"] = "N/A"     
+                else:
+                    segment.parameters["calc_scan_area_mz"] = "N/A"
+            
+            try: 
+                ramp_time_ms = float(segment.parameters.get("IMS_imeX_RampTime") or 0) 
+                quench_time = float(segment.parameters.get("Collision_QuenchTime_Set") or 0) 
+                total_scans = segment.parameters.get("calc_ms1_scans", 0) + segment.parameters.get("calc_ramps", 0)
+                if total_scans > 0:
                     cycle_time_s = total_scans * (ramp_time_ms + quench_time) / 1000 
-                    segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s" 
-                except (ValueError, TypeError, AttributeError): 
-                    segment.parameters["calc_cycle_time"] = "N/A" 
+                    segment.parameters["calc_cycle_time"] = f"{cycle_time_s:.2f} s"
+                else:
+                    segment.parameters["calc_cycle_time"] = "N/A"
+            except (ValueError, TypeError, AttributeError): 
+                segment.parameters["calc_cycle_time"] = "N/A" 
+
         except Exception as e: 
-            self.logger.debug("Failed to process diagonal-PASEF data: %s", e) 
+            self.logger.debug("Failed to process diagonal-PASEF data: %s", e)
+        finally:
+            if conn:
+                conn.close()
     
     def _find_file(self, start_folder: str, file_patterns: List[str]) -> Optional[str]: 
         for root, _, files in os.walk(start_folder): 
@@ -875,34 +1100,48 @@ class DataLoaderService:
     def parse_additional_parameters(self, dataset: Dataset, additional_params_info: List[Dict], ion_source: Optional[str] = None): 
         if not hasattr(dataset, 'xml_root') or not additional_params_info: 
             return 
-        instrument_scope_element = dataset.xml_root.find('instrument') 
         
-        all_defs_map = {p['permname']: p for p in self.config.all_definitions} 
+        instrument_scope_element = dataset.xml_root.find('instrument') 
+        method_scope_element = dataset.xml_root.find('method') 
+        
+        all_defs_map = self.config.parameter_config_map
         polarity_map = all_defs_map.get("Mode_IonPolarity", {}).get("value_map", {}) 
         
-        last_segment_params = {} 
         for segment in dataset.segments: 
-            final_polarity_raw_val = last_segment_params.get("Mode_IonPolarity") 
+            final_polarity_raw_val = segment.parameters.get("Mode_IonPolarity")
             
-            current_polarity_el = segment.xml_scope_element.find(f".//*[@permname='Mode_IonPolarity']") 
-            polarity_val_current = self._get_value_from_element(current_polarity_el, {}) 
-            
-            if polarity_val_current is not None: 
-                final_polarity_raw_val = polarity_val_current 
+            if final_polarity_raw_val is None and segment.xml_scope_element is not None:
+                 pol_el = segment.xml_scope_element.find(".//*[@permname='Mode_IonPolarity']")
+                 final_polarity_raw_val = self._get_value_from_element(pol_el, {})
+
+            if final_polarity_raw_val is None and method_scope_element is not None:
+                 pol_el = method_scope_element.find(".//*[@permname='Mode_IonPolarity']")
+                 final_polarity_raw_val = self._get_value_from_element(pol_el, {})
+
             polarity_string = polarity_map.get(str(final_polarity_raw_val)) 
             
-            all_params_to_check = dataset.default_params + additional_params_info 
+            method_values = {}
+            if method_scope_element is not None:
+                method_values = self._parse_parameters_for_scope(
+                    param_scope_element=method_scope_element,
+                    instrument_scope_element=instrument_scope_element,
+                    param_info=additional_params_info,
+                    ion_polarity=polarity_string,
+                    ion_source=ion_source
+                )
+
+            segment_values = {}
+            if segment.xml_scope_element is not None:
+                segment_values = self._parse_parameters_for_scope( 
+                    param_scope_element=segment.xml_scope_element, 
+                    instrument_scope_element=instrument_scope_element, 
+                    param_info=additional_params_info, 
+                    ion_polarity=polarity_string,
+                    ion_source=ion_source 
+                ) 
             
-            new_values = self._parse_parameters_for_scope( 
-                method_scope_element=segment.xml_scope_element, 
-                instrument_scope_element=instrument_scope_element, 
-                param_info=all_params_to_check, 
-                ion_polarity=polarity_string,
-                ion_source=ion_source 
-            ) 
-            segment.parameters.update(last_segment_params) 
-            segment.parameters.update(new_values) 
-            last_segment_params = segment.parameters.copy() 
+            segment.parameters.update(method_values)
+            segment.parameters.update(segment_values)
     
     def save_user_view_definitions(self, view_data: Dict[str, List[str]]) -> bool:
         save_path = self.config.user_view_definitions_path
@@ -937,8 +1176,311 @@ class DataLoaderService:
             self.logger.error(f"Failed to reset user view definitions by deleting file: {e}", exc_info=True)
             return False
 
+    def get_parameter_view_data(self, datasets: List[Dataset], view_config: List[Dict]) -> Dict[str, List[Dict]]:
+        if not datasets:
+            return {}
+
+        has_ats_on = any(ds.get_parameter_value("IMS_ATS_Active") == '1' for ds in datasets for seg in ds.segments)
+        has_ats_off = any(ds.get_parameter_value("IMS_ATS_Active") != '1' for ds in datasets for seg in ds.segments)
+        is_mixed_ats_mode = has_ats_on and has_ats_off
+        
+        has_aip_active = any(
+            ds.get_parameter_value("FocusPreTOF_AIP_Switch_Set") == '1' 
+            for ds in datasets for seg in ds.segments
+        )
+
+        has_aip_ms_table_data = any(
+            s.parameters.get("calc_aip_lens1_profile_ms_display_list") not in (None, ["No Data"]) 
+            for ds in datasets for s in ds.segments
+        )
+        has_aip_msms_table_data = any(
+            s.parameters.get("calc_aip_lens1_profile_msms_display_list") not in (None, ["No Data"]) 
+            for ds in datasets for s in ds.segments
+        )
+        
+        all_known_permnames = set(self.config.parameter_config_map.keys())
+        active_view_config = list(view_config)
+
+        final_config_list = []
+        for param_config in active_view_config:
+            permname = param_config.get('permname')
+            if not permname: continue
+
+            if permname in ["calc_aip_lens1_profile_ms_report_block", "calc_aip_lens1_profile_msms_report_block"]:
+                continue
+
+            if permname == "FocusPreTOF_AIP_Switch_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Athena Ion Processor"
+                param_config["category"] = "Focus Pre TOF"
+                param_config["type"] = "boolean"
+            
+            if permname == "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Storage Time Ramping - MS"
+                param_config["category"] = "Focus Pre TOF"
+                param_config["type"] = "boolean"
+
+            if permname == "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_MSMS_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Storage Time Ramping - MS/MS"
+                param_config["category"] = "Focus Pre TOF"
+                param_config["type"] = "boolean"
+
+            if permname == "FocusPreTOF_Lens1_Storage_Extraction_Delta_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Storage Delta"
+                param_config["category"] = "Focus Pre TOF"
+            
+            if permname == "FocusPreTOF_Lens1_TransferTime_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Transfer Time"
+                param_config["category"] = "Focus Pre TOF"
+
+            if permname == "FocusPreTOF_Lens1_PrePulseStorageTime_Set":
+                param_config = param_config.copy()
+                param_config["label"] = "Pre Pulse Storage"
+                param_config["category"] = "Focus Pre TOF"
+
+            if permname == "Internal_SWCompatibilityUseIMS":
+                param_config = param_config.copy()
+                param_config['category'] = "TIMS"
+            
+            if has_aip_active and permname in ["FocusPreTOF_Lens1_TransferTime_Set", "FocusPreTOF_Lens1_PrePulseStorageTime_Set"]:
+                continue
+                
+            if not has_aip_active and permname in ["FocusPreTOF_AIP_Lens1_TransferTime_Set", "FocusPreTOF_AIP_Lens1_PrePulseStorageTime_Set"]:
+                continue
+
+            if permname == "calc_aip_lens1_profile_ms_display_list" and not has_aip_ms_table_data: continue
+            if permname == "calc_aip_lens1_profile_msms_display_list" and not has_aip_msms_table_data: continue
+            
+            aip_related = [
+                "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_Set", 
+                "FocusPreTOF_AIP_Delay_Time_Ramp_Switch_MSMS_Set",
+                "calc_aip_storage_time_ms",
+                "calc_aip_storage_time_msms"
+            ]
+            if permname in aip_related and not has_aip_active:
+                continue
+
+            is_ats_param = "_ATS_" in permname
+            is_paired = False
+            if is_ats_param:
+                counterpart = permname.replace("_ATS_", "_", 1)
+                if counterpart in all_known_permnames: is_paired = True
+            else:
+                parts = permname.split('_', 1)
+                if len(parts) > 1:
+                    counterpart = f"{parts[0]}_ATS_{parts[1]}"
+                    if counterpart in all_known_permnames: is_paired = True
+
+            config_to_add = param_config
+            if is_paired and permname != "IMS_ATS_Active":
+                if is_mixed_ats_mode:
+                    if is_ats_param:
+                        config_to_add = param_config.copy()
+                        config_to_add['label'] = f"{param_config.get('label', permname)} (Stepping active)"
+                elif has_ats_on:
+                    if not is_ats_param: continue
+                else: 
+                    if is_ats_param: continue
+            elif is_ats_param and not has_ats_on and permname != "IMS_ATS_Active":
+                continue
+
+            final_config_list.append(config_to_add)
+
+        displayed_permnames = {p['permname'] for p in final_config_list}
+        if "calc_scan_mode" in displayed_permnames:
+            final_config_list = [p for p in final_config_list if p.get('permname') != "Mode_ScanMode"]
+
+        grouped_params = defaultdict(list)
+        for p_config in final_config_list:
+            grouped_params[p_config.get("category", "General")].append(p_config)
+        
+        segment_info_group = " Segment Information"
+
+        if any(len(ds.segments) > 1 for ds in datasets):
+            grouped_params[segment_info_group] = [
+                {"permname": "calc_segment_desc", "label": "Segment", "category": segment_info_group}
+            ]
+
+        if "Mode" not in grouped_params: grouped_params["Mode"] = []
+        
+        if not any(p['permname'] == 'calc_is_calibration' for p in grouped_params["Mode"]):
+             calib_param_config = {"permname": "calc_is_calibration", "label": "Calibration Segment", "category": "Mode"}
+             grouped_params["Mode"].insert(0, calib_param_config)
+
+        structured_data = {}
+        
+        def sort_key(g):
+            if g == segment_info_group: return -1
+            if g == "General": return 0
+            if g == "Mode": return 1
+            if g == "TIMS": return 2
+            if g == "TIMS ICC": return 3
+            if g == "Calculated Parameters": return 4
+            if g == "Focus Pre TOF": return 5
+            if g == "Energy Ramping": return 6
+            if g == "Collision Cell": return 7
+            if g == "TOF": return 8
+            return 9
+            
+        sorted_groups = sorted(grouped_params.keys(), key=sort_key)
+        
+        default_params = self.get_default_parameters_for_view(datasets)
+        order_map = {p['permname']: i for i, p in enumerate(default_params)}
+        
+        order_map["FocusPreTOF_AIP_Switch_Set"] = 9980
+        order_map["calc_aip_lens1_profile_ms_display_list"] = 9981
+        order_map["calc_aip_lens1_profile_msms_display_list"] = 9982
+        order_map["FocusPreTOF_AIP_Delay_Time_Ramp_Switch_Set"] = 9983
+        order_map["calc_aip_storage_time_ms"] = 9984
+        order_map["FocusPreTOF_AIP_Delay_Time_Ramp_Switch_MSMS_Set"] = 9985
+        order_map["calc_aip_storage_time_msms"] = 9986
+        order_map["FocusPreTOF_Lens1_Storage_Extraction_Delta_Set"] = 9987
+        order_map["FocusPreTOF_Lens1_TransferTime_Set"] = 9988
+        order_map["FocusPreTOF_AIP_Lens1_TransferTime_Set"] = 9988
+        order_map["FocusPreTOF_Lens1_PrePulseStorageTime_Set"] = 9989
+        order_map["FocusPreTOF_AIP_Lens1_PrePulseStorageTime_Set"] = 9989
+        
+        order_map["calc_advanced_ce_ramping_display_list"] = 5000
+        
+        order_map["calc_ce_ramping_start"] = 5001
+        
+        order_map["calc_ce_ramping_end"] = 5002
+
+        any_model_identified = any(ds.instrument_model and ds.instrument_model != "Unknown" for ds in datasets)
+
+        for group_name in sorted_groups:
+            rows = []
+            params_in_group = sorted(
+                grouped_params[group_name],
+                key=lambda p: (order_map.get(p['permname'], float('inf')), p.get('label', ''))
+            )
+
+            for p_config in params_in_group:
+                permname = p_config['permname']
+                row_data = {
+                    'label': p_config.get('label', permname),
+                    'values': [],
+                    'is_list': False,
+                    'is_diff': False,
+                    'permname': permname,
+                    'config': p_config 
+                }
+                
+                if permname == "calc_segment_desc":
+                    vals = []
+                    for ds in datasets:
+                        try:
+                            seg = ds.segments[ds.active_segment_index]
+                            desc = f"{ds.active_segment_index + 1} ({seg.start_time:.2f}-{seg.end_time_display})"
+                            if seg.is_calibration_segment: desc += " [Calib]"
+                            vals.append(desc)
+                        except IndexError: vals.append("N/A")
+                    row_data['values'] = vals
+                elif permname == "calc_instrument_model":
+                    if not any_model_identified: continue
+                    row_data['values'] = [(ds.instrument_model if ds.instrument_model != "Unknown" else "N/A") for ds in datasets]
+                elif permname == "calc_tims_control_version":
+                    row_data['values'] = [ds.tims_control_version or "N/A" for ds in datasets]
+                elif permname == "calc_last_modified_date":
+                    vals = []
+                    for ds in datasets:
+                        v = ds.last_modified_date
+                        try: vals.append(v.split('T')[0] if v and 'T' in v else v or "N/A")
+                        except: vals.append(v or "N/A")
+                    row_data['values'] = vals
+                elif permname == "calc_is_calibration":
+                    row_data['values'] = []
+                    for ds in datasets:
+                        try: row_data['values'].append("Yes" if ds.segments[ds.active_segment_index].is_calibration_segment else "No")
+                        except IndexError: row_data['values'].append("N/A")
+                else:
+                    is_present = any(permname in ds.segments[ds.active_segment_index].parameters for ds in datasets if ds.segments)
+                    if not is_present: continue
+
+                    raw_values = []
+                    for ds in datasets:
+                        try: raw_values.append(ds.segments[ds.active_segment_index].parameters.get(permname))
+                        except IndexError: raw_values.append(None)
+
+                    if any(isinstance(val, list) for val in raw_values):
+                        row_data['is_list'] = True
+                        row_data['values'] = raw_values
+                    else:
+                        row_data['values'] = [format_parameter_value(val, p_config) for val in raw_values]
+
+                if not row_data['is_list']:
+                    valid_values = [v for v in row_data['values'] if v not in ["", "N/A"]]
+                    if len(set(valid_values)) > 1:
+                        row_data['is_diff'] = True
+                
+                rows.append(row_data)
+            
+            if rows:
+                display_group_name = group_name.strip()
+                structured_data[display_group_name] = rows
+
+        return structured_data
+
+class SessionService:
+    def __init__(self, loader_service: DataLoaderService):
+        self.loader = loader_service
+        self.logger = logging.getLogger(__name__)
+
+    def save_session(self, file_path: str, datasets: List[Dataset], displayed_params: Optional[List[Dict]]):
+        try:
+            serialized_datasets = [ds.to_dict() for ds in datasets]
+            
+            session_data = {
+                "version": "1.0",
+                "datasets": serialized_datasets,
+                "displayed_params": displayed_params
+            }
+            
+            with gzip.open(file_path, 'wt', encoding='utf-8') as f:
+                json.dump(session_data, f, cls=NumpyEncoder)
+                
+            self.logger.info(f"Session successfully saved to {file_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save session: {e}", exc_info=True)
+            raise IOError(f"Could not save session: {e}")
+
+    def load_session(self, file_path: str) -> Tuple[List[Dataset], Optional[List[Dict]]]:
+        try:
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                session_data = json.load(f)
+                
+            version = session_data.get("version", "1.0")
+            if version != "1.0":
+                self.logger.warning(f"Session version {version} might be incompatible.")
+
+            datasets_data = session_data.get("datasets", [])
+            restored_datasets = []
+            
+            for ds_data in datasets_data:
+                dataset = Dataset.from_dict(ds_data)
+                
+                self.loader.restore_xml_structure(dataset)
+                
+                restored_datasets.append(dataset)
+                
+            displayed_params = session_data.get("displayed_params")
+            
+            self.logger.info(f"Session loaded from {file_path} ({len(restored_datasets)} datasets)")
+            return restored_datasets, displayed_params
+
+        except Exception as e:
+            self.logger.error(f"Failed to load session: {e}", exc_info=True)
+            raise IOError(f"Could not load session: {e}")
 
 class PlottingService: 
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+
     def generate_plot_as_buffer(self, dataset: Dataset, width_px: int, height_px: int, bg_color: str = "#E4EFF7", for_report: bool = False, dpi: int = 100, show_filename: bool = True, autofit: bool = True) -> Optional[io.BytesIO]: 
         try: 
             active_segment = dataset.segments[dataset.active_segment_index] 
@@ -991,7 +1533,7 @@ class PlottingService:
             return ctk.CTkImage(light_image=image, dark_image=image, size=(image.width, image.height)) 
         return None
 
-    def _setup_plot(self, width: float, height: float, title: str, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Tuple[plt.Figure, plt.Axes]: 
+    def _setup_plot(self, width: float, height: float, title: str, bg_color: str, for_report: bool = False, is_vector: bool = False) -> Tuple[Figure, Any]: 
         if for_report: 
             title_fs, label_fs, tick_fs = 14, 12, 10 
         else: 
@@ -1002,10 +1544,11 @@ class PlottingService:
         if not is_vector: 
             figsize = (width / dpi, height / dpi) 
 
-        fig, ax = plt.subplots(figsize=figsize, dpi=dpi) 
+        fig = Figure(figsize=figsize, dpi=dpi)
+        fig.set_facecolor(bg_color)
         
-        fig.set_facecolor(bg_color) 
-        ax.set_facecolor(bg_color) 
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(bg_color)
 
         ax.set_xlabel('m/z', color='#04304D', fontsize=label_fs) 
         ax.set_ylabel('1/K0', color='#04304D', fontsize=label_fs) 
@@ -1022,11 +1565,17 @@ class PlottingService:
         fig.subplots_adjust(left=0.18, bottom=0.22, right=0.98, top=0.85) 
         return fig, ax 
 
-    def _render_figure_to_buffer(self, fig: plt.Figure, dpi: int, fmt: str) -> io.BytesIO: 
-        buf = io.BytesIO() 
-        fig.savefig(buf, format=fmt, facecolor=fig.get_facecolor(), dpi=dpi, bbox_inches='tight') 
-        buf.seek(0) 
-        plt.close(fig) 
+    def _render_figure_to_buffer(self, fig: Figure, dpi: int, fmt: str) -> io.BytesIO: 
+        buf = io.BytesIO()
+        
+        canvas = FigureCanvasAgg(fig)
+        
+        if fmt == 'svg':
+             fig.savefig(buf, format=fmt, facecolor=fig.get_facecolor(), bbox_inches='tight')
+        else:
+             canvas.print_figure(buf, format=fmt, dpi=dpi, facecolor=fig.get_facecolor(), bbox_inches='tight')
+             
+        buf.seek(0)
         return buf 
 
     def _truncate_middle(self, text: str, max_len: int) -> str: 
@@ -1035,13 +1584,13 @@ class PlottingService:
         part_len = (max_len - 3) // 2 
         return f"{text[:part_len]}...{text[-part_len:]}" 
     
-    def _draw_dia_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
+    def _draw_dia_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[Figure, Any]]:
         df_prepared = segment.dia_windows_data 
         if df_prepared is None or df_prepared.empty or 'CycleId' not in df_prepared.columns: 
             return None 
         fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
         unique_cycles = df_prepared['CycleId'].unique() 
-        colors = plt.cm.viridis_r(np.linspace(0, 1, len(unique_cycles))) 
+        colors = matplotlib.cm.viridis_r(np.linspace(0, 1, len(unique_cycles))) 
         cycle_color_map = dict(zip(unique_cycles, colors)) 
         for _, row in df_prepared.iterrows(): 
             rect_height = row['plot_y_end'] - row['plot_y_start'] 
@@ -1064,59 +1613,81 @@ class PlottingService:
             ax.autoscale_view() 
         return fig, ax 
 
-    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
-        p = segment.diagonal_pasef_data 
-        if p is None: return None 
-        slope, origin = p['slope'], p['origin'] 
-        total_pattern_width_mz, slice_isolation_width_mz = p['width_mz'], p['isolation_mz'] 
-        num_slices = int(p['number_of_slices']) 
+    def _draw_diagonal_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[Figure, Any]]:
+        plot_data = segment.diagonal_pasef_data 
+        if plot_data is None: return None 
+        
         measured_mobility_start = segment.parameters.get("calc_im_start") 
         measured_mobility_end = segment.parameters.get("calc_im_end") 
         if measured_mobility_start is None or measured_mobility_end is None: return None 
-        if slope == 0: return None 
-        fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
-        colors = plt.cm.viridis_r(np.linspace(0, 1, num_slices)) 
-        center_mz1, center_mz2 = (measured_mobility_start - origin) / slope, (measured_mobility_end - origin) / slope 
-        pattern_start1, pattern_start2 = center_mz1 - (total_pattern_width_mz / 2), center_mz2 - (total_pattern_width_mz / 2) 
-        step_mz = total_pattern_width_mz / num_slices if num_slices > 0 else 0 
-        for i in range(num_slices): 
-            slice_start_mz_bottom = pattern_start1 + (i * step_mz) 
-            slice_start_mz_top = pattern_start2 + (i * step_mz) 
-            slice_end_mz_bottom = slice_start_mz_bottom + slice_isolation_width_mz 
-            slice_end_mz_top = slice_start_mz_top + slice_isolation_width_mz 
-            vertices = [ 
-                (slice_start_mz_bottom, measured_mobility_start), (slice_end_mz_bottom,   measured_mobility_start), 
-                (slice_end_mz_top,      measured_mobility_end), (slice_start_mz_top,    measured_mobility_end) 
-            ] 
-            polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
-            ax.add_patch(polygon) 
-        if autofit:
-            ax.autoscale_view()
-        elif mz_range and k0_range:
-            try:
-                mz_buffer = (mz_range[1] - mz_range[0]) * 0.05
-                k0_buffer = (k0_range[1] - k0_range[0]) * 0.05
-                ax.set_xlim(mz_range[0] - mz_buffer, mz_range[1] + mz_buffer)
-                ax.set_ylim(k0_range[0] - k0_buffer, k0_range[1] + k0_buffer)
-            except (ValueError, TypeError):
-                self.logger.warning("Could not apply full axis limits, falling back to autoscale.")
-                ax.autoscale_view() 
-        else:
-            ax.autoscale_view() 
-        xlim, ylim = ax.get_xlim(), ax.get_ylim() 
-        x_buffer, y_buffer = (xlim[1] - xlim[0]) * 0.05, (ylim[1] - ylim[0]) * 0.05 
-        ax.set_xlim(xlim[0] - x_buffer, xlim[1] + x_buffer) 
-        ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer) 
-        return fig, ax 
 
-    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[plt.Figure, plt.Axes]]:
-        if not segment.pasef_polygon_data: return None 
-        mass_coords, mobility_coords = segment.pasef_polygon_data 
-        if not mass_coords or not mobility_coords or len(mass_coords) != len(mobility_coords): return None 
-        polygon_points = list(zip(mass_coords, mobility_coords)) 
         fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
-        polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7) 
-        ax.add_patch(polygon) 
+        
+        if isinstance(plot_data, pd.DataFrame):
+            pasef_slices_df = plot_data[plot_data['type'] != 0].copy()
+            if pasef_slices_df.empty:
+                return None 
+                
+            num_slices = len(pasef_slices_df)
+            colors = matplotlib.cm.viridis_r(np.linspace(0, 1, num_slices)) 
+
+            for i, row in enumerate(pasef_slices_df.itertuples()):
+                if row.slope == 0: continue
+                
+                half_width = row.isolation_mz / 2
+                
+                center_mz_bottom = (measured_mobility_start - row.origin) / row.slope
+                slice_start_mz_bottom = center_mz_bottom - half_width
+                slice_end_mz_bottom = center_mz_bottom + half_width
+                
+                center_mz_top = (measured_mobility_end - row.origin) / row.slope
+                slice_start_mz_top = center_mz_top - half_width
+                slice_end_mz_top = center_mz_top + half_width
+                
+                vertices = [ 
+                    (slice_start_mz_bottom, measured_mobility_start), 
+                    (slice_end_mz_bottom,   measured_mobility_start), 
+                    (slice_end_mz_top,      measured_mobility_end), 
+                    (slice_start_mz_top,    measured_mobility_end) 
+                ] 
+                polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
+                ax.add_patch(polygon) 
+
+        elif isinstance(plot_data, dict):
+            p = plot_data
+            slope, origin = p['slope'], p['origin'] 
+            total_pattern_width_mz, slice_isolation_width_mz = p['width_mz'], p['isolation_mz'] 
+            num_slices = int(p['number_of_slices']) 
+            
+            if slope == 0:
+                return None 
+            
+            colors = matplotlib.cm.viridis_r(np.linspace(0, 1, num_slices)) 
+            half_iso_width = slice_isolation_width_mz / 2
+            
+            center_mz1_first = (measured_mobility_start - origin) / slope 
+            center_mz2_first = (measured_mobility_end - origin) / slope 
+            
+            step_mz = total_pattern_width_mz / num_slices if num_slices > 0 else 0 
+            
+            for i in range(num_slices): 
+                center_mz_bottom = center_mz1_first + (i * step_mz)
+                center_mz_top = center_mz2_first + (i * step_mz)
+                
+                slice_start_mz_bottom = center_mz_bottom - half_iso_width
+                slice_start_mz_top = center_mz_top - half_iso_width
+                slice_end_mz_bottom = center_mz_bottom + half_iso_width
+                slice_end_mz_top = center_mz_top + half_iso_width
+                
+                vertices = [ 
+                    (slice_start_mz_bottom, measured_mobility_start), (slice_end_mz_bottom,   measured_mobility_start), 
+                    (slice_end_mz_top,      measured_mobility_end), (slice_start_mz_top,    measured_mobility_end) 
+                ] 
+                polygon = patches.Polygon(vertices, linewidth=1, edgecolor='#04304D', facecolor=colors[i], alpha=0.7) 
+                ax.add_patch(polygon)
+        else:
+            return None
+        
         if autofit:
             ax.autoscale_view()
         elif mz_range and k0_range:
@@ -1130,7 +1701,46 @@ class PlottingService:
                 ax.autoscale_view() 
         else:
             ax.autoscale_view() 
-        return fig, ax 
+        
+        if autofit:
+            xlim, ylim = ax.get_xlim(), ax.get_ylim() 
+            x_buffer, y_buffer = (xlim[1] - xlim[0]) * 0.05, (ylim[1] - ylim[0]) * 0.05 
+            ax.set_xlim(xlim[0] - x_buffer, xlim[1] + x_buffer) 
+            ax.set_ylim(ylim[0] - y_buffer, ylim[1] + y_buffer) 
+        
+        return fig, ax
+
+    def _draw_pasef_plot_figure(self, segment: Segment, title: str, width: float, height: float, bg_color: str, for_report: bool = False, is_vector: bool = False, autofit: bool = True, mz_range: Optional[Tuple] = None, k0_range: Optional[Tuple] = None) -> Optional[Tuple[Figure, Any]]:
+        if not segment.pasef_polygon_data: return None 
+        
+        polygon_list = segment.pasef_polygon_data 
+        if not polygon_list or not all(polygon_list):
+             self.logger.warning("PASEF polygon data is empty or invalid. Skipping plot.")
+             return None
+
+        fig, ax = self._setup_plot(width, height, title, bg_color, for_report, is_vector) 
+        
+        for polygon_points in polygon_list:
+            if polygon_points and len(polygon_points) > 2:
+                polygon = patches.Polygon(polygon_points, linewidth=1, edgecolor='#04304D', facecolor='#0071BC', alpha=0.7) 
+                ax.add_patch(polygon) 
+            else:
+                self.logger.debug(f"Skipping invalid polygon with {len(polygon_points)} points.")
+        
+        if autofit:
+            ax.autoscale_view()
+        elif mz_range and k0_range:
+            try:
+                mz_buffer = (mz_range[1] - mz_range[0]) * 0.05
+                k0_buffer = (k0_range[1] - k0_range[0]) * 0.05
+                ax.set_xlim(mz_range[0] - mz_buffer, mz_range[1] + mz_buffer)
+                ax.set_ylim(k0_range[0] - k0_buffer, k0_range[1] + k0_buffer)
+            except (ValueError, TypeError):
+                self.logger.warning("Could not apply full axis limits, falling back to autoscale.")
+                ax.autoscale_view() 
+        else:
+            ax.autoscale_view() 
+        return fig, ax
 
     def generate_plot_as_svg_buffer(self, dataset: Dataset, width_in: float, height_in: float, bg_color: str = "white", show_filename: bool = True) -> Optional[io.BytesIO]: 
         try: 
@@ -1157,7 +1767,7 @@ class PlottingService:
         if fig: 
             fig.subplots_adjust(left=0.15, right=0.95, bottom=0.22, top=0.85) 
             return self._render_figure_to_buffer(fig, 0, 'svg') 
-        return None 
+        return None
 
 class ReportGeneratorService: 
     def __init__(self, plotting_service: PlottingService, config: AppConfig, loader_service: DataLoaderService): 
@@ -1166,114 +1776,334 @@ class ReportGeneratorService:
         self.loader = loader_service 
         self.logger = logging.getLogger(__name__) 
 
-    def generate_report(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict],  
-                        export_format: str, file_path: str, show_filename: bool, include_plot: bool, 
-                        progress_callback: Optional[Callable] = None): 
-        
+    def generate_report(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], export_format: str, file_path: str, show_filename: bool, include_plot: bool, progress_callback: Optional[Callable] = None): 
         permnames_in_report = {p['permname'] for p in params_to_include} 
+        
         if "calc_scan_mode" in permnames_in_report and "Mode_ScanMode" in permnames_in_report: 
             params_to_include = [p for p in params_to_include if p['permname'] != "Mode_ScanMode"] 
-
+        
         if export_format == 'csv': 
-            if progress_callback: progress_callback(1, "Preparing data for CSV...") 
+            if progress_callback: 
+                progress_callback(1, "Preparing data for CSV...") 
             self._generate_csv(dataset, selected_segment_indices, params_to_include, file_path) 
-            if progress_callback: progress_callback(1, "CSV export complete.") 
+            if progress_callback: 
+                progress_callback(1, "CSV export complete.") 
         elif export_format == 'pdf': 
             self._generate_pdf(dataset, selected_segment_indices, params_to_include, file_path, show_filename, include_plot, progress_callback) 
 
-    def _get_default_param_configs_for_dataset(self, dataset: Dataset) -> List[Dict]: 
-        if not dataset or not dataset.segments: 
-            return [] 
-
-        has_multisegment_file = len(dataset.segments) > 1 
-        has_advanced_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") == '1' for s in dataset.segments) 
-        has_standard_ce = any(s.parameters.get("Energy_Ramping_Advanced_Settings_Active") != '1' for s in dataset.segments) 
-        has_icc_mode1 = any(s.parameters.get("IMSICC_Mode") == '1' for s in dataset.segments) 
-        has_icc_mode2 = any(s.parameters.get("IMSICC_Mode") == '2' for s in dataset.segments) 
-
-        all_workflows_in_dataset = {s.workflow_name for s in dataset.segments if s.workflow_name} 
-        default_params_by_workflow = self.config.parameter_definitions 
-
-        default_permnames_ordered = [] 
-        seen_permnames = set() 
-
-        def add_unique(permnames): 
-            for pname in permnames: 
-                if pname not in seen_permnames: 
-                    seen_permnames.add(pname) 
-                    default_permnames_ordered.append(pname) 
-
-        add_unique(default_params_by_workflow.get('__GENERAL__', [])) 
-        for wf in sorted(list(all_workflows_in_dataset)): 
-            add_unique(default_params_by_workflow.get(wf, [])) 
+    def generate_batch_report(self, datasets: List[Dataset], params_to_include: List[Dict], 
+                              output_dir: str, export_format: str, include_all_segments: bool, 
+                              include_plot: bool, show_filename: bool, 
+                              report_name: str = "MethodReport",
+                              progress_callback: Optional[Callable] = None) -> Tuple[int, List[str]]:
+        import os
+        export_format = export_format.lower()
+        total_files = len(datasets)
+        success_count = 0
+        errors = []
         
-        if "calc_scan_mode" in seen_permnames and "Mode_ScanMode" in seen_permnames: 
-            default_permnames_ordered.remove("Mode_ScanMode") 
+        for i, dataset in enumerate(datasets):
+            try:
+                ext = f".{export_format}"
+                base_name = os.path.splitext(dataset.display_name)[0]
+                safe_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+                
+                safe_report_name = "".join(c for c in report_name if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+                if not safe_report_name: 
+                    safe_report_name = "MethodReport"
 
-        all_definitions_map = {p['permname']: p for p in self.config.all_definitions} 
-        default_param_configs = [] 
-
-        for pname in default_permnames_ordered: 
-            if pname in ["calc_segment_start_time", "calc_segment_end_time"] and not has_multisegment_file: continue 
-            if pname in ["calc_ce_ramping_start", "calc_ce_ramping_end"] and not has_standard_ce: continue 
-            if pname == "calc_advanced_ce_ramping_display_list" and not has_advanced_ce: continue 
-            if pname == 'IMSICC_Target' and not has_icc_mode1: continue 
-            
-            mode2_params = ["IMSICC_ICC2_MaxTicTargetPercent", "IMSICC_ICC2_MinAccuTime", "IMSICC_ICC2_ReferenceTicCapacity", "IMSICC_ICC2_SmoothingFactor"] 
-            if pname in mode2_params and not has_icc_mode2: continue 
-
-            param_config = all_definitions_map.get(pname) 
-            if not param_config and pname.startswith("calc_"): 
-                label_map = {"calc_scan_area_mz": "Window Scan Area", "calc_ramps": "Ramps per Cycle", "calc_ms1_scans": "MS1 Scans per Cycle", "calc_steps": "Isolation Steps per Cycle", "calc_mz_width": "Isolation Window Width", "calc_ce_ramping_start": "CE Ramping Start", "calc_ce_ramping_end": "CE Ramping End"} 
-                label = label_map.get(pname, pname.replace("calc_", "").replace("_", " ").title()) 
-                category = "Mode" if "Scan Mode" in label else "Calculated Parameters" 
-                param_config = {"permname": pname, "label": label, "category": category} 
-            
-            if param_config: 
-                default_param_configs.append(param_config) 
+                filename = f"{safe_name}_{safe_report_name}{ext}"
+                file_path = os.path.join(output_dir, filename)
+                
+                if include_all_segments: 
+                    selected_segment_indices = list(range(len(dataset.segments)))
+                else: 
+                    selected_segment_indices = [dataset.active_segment_index]
+                
+                if progress_callback: 
+                    progress_callback(i, total_files, f"Processing {i+1}/{total_files}: {dataset.display_name}")
+                
+                self.generate_report(
+                    dataset=dataset, 
+                    selected_segment_indices=selected_segment_indices, 
+                    params_to_include=params_to_include, 
+                    export_format=export_format, 
+                    file_path=file_path, 
+                    show_filename=show_filename, 
+                    include_plot=include_plot, 
+                    progress_callback=None
+                )
+                success_count += 1
+            except Exception as e:
+                msg = f"{dataset.display_name}: {str(e)}"
+                self.logger.error(f"Batch export failed for {msg}", exc_info=True)
+                errors.append(msg)
         
-        return default_param_configs 
+        return success_count, errors
+
+    def generate_comparison_csv(self, file_path: str, view_data: Dict[str, List[Dict]], datasets: List[Dataset], show_filenames: bool = True):
+        if show_filenames:
+            dataset_headers = [ds.display_name for ds in datasets]
+        else:
+            dataset_headers = [f"Dataset {i+1}" for i in range(len(datasets))]
+
+        headers = ["Category", "Parameter"] + dataset_headers
+        
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                
+                for group_name, rows in view_data.items():
+                    for row in rows:
+                        clean_values = []
+                        for val in row['values']:
+                            if isinstance(val, list): 
+                                clean_values.append("; ".join(map(str, val)))
+                            else: 
+                                clean_values.append(str(val) if val is not None else "")
+                        
+                        csv_row = [group_name, row['label']] + clean_values
+                        writer.writerow(csv_row)
+        except Exception as e:
+            self.logger.error(f"Failed to export comparison CSV: {e}", exc_info=True)
+            raise IOError(f"Failed to export CSV: {e}")
+
+    def generate_comparison_pdf(self, file_path: str, view_data: Dict[str, List[Dict]], datasets: List[Dataset], include_plots: bool = False, show_filenames: bool = True):
+        class ComparisonPDF(FPDF):
+            def __init__(self, orientation='L', unit='mm', format='A4'):
+                super().__init__(orientation=orientation, unit=unit, format=format)
+                self.set_auto_page_break(auto=False)
+                self.font_name = "Helvetica"
+                try:
+                    font_regular_path = resource_path("assets/DejaVuSans.ttf")
+                    font_bold_path = resource_path("assets/DejaVuSans-Bold.ttf")
+                    self.add_font("DejaVu", "", font_regular_path)
+                    self.add_font("DejaVu", "B", font_bold_path)
+                    self.font_name = "DejaVu"
+                except RuntimeError: pass
+
+            def header(self):
+                pass
+
+            def footer(self):
+                self.set_y(-15)
+                self.set_font(self.font_name, "", 8)
+                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", 0, 0, "R")
+
+        pdf = ComparisonPDF()
+        pdf.alias_nb_pages()
+
+        margin = 10
+        pdf.set_margins(margin, margin, margin)
+        page_width = 297 - (2 * margin)
+        page_height = 210
+        bottom_limit = page_height - 20 
+
+        param_col_width = 60 
+        
+        min_data_col_width = 40 
+        max_data_col_width = 70  
+        
+        available_data_width = page_width - param_col_width
+        
+        max_cols_per_page = int(available_data_width // min_data_col_width)
+        if max_cols_per_page < 1: max_cols_per_page = 1 
+        
+        total_datasets = len(datasets)
+        if total_datasets == 0:
+            dataset_chunks = []
+        else:
+            dataset_chunks = [datasets[i:i + max_cols_per_page] for i in range(0, total_datasets, max_cols_per_page)]
+
+        def draw_header(batch_datasets, col_width):
+            pdf.set_font(pdf.font_name, "B", 14)
+            pdf.cell(0, 10, "Comparison Report", 0, 1, "C")
+            pdf.ln(5)
+
+            pdf.set_font(pdf.font_name, "B", 9)
+            pdf.set_fill_color(4, 48, 77) 
+            pdf.set_text_color(255, 255, 255)
+
+            pdf.cell(param_col_width, 8, " Parameter", 1, 0, "L", fill=True)
+            
+            for ds in batch_datasets:
+                if show_filenames:
+                    header_text = ds.display_name
+                else:
+                    orig_idx = datasets.index(ds) + 1
+                    header_text = f"Dataset {orig_idx}"
+
+                if pdf.get_string_width(header_text) > col_width - 2:
+                    avail_len = int((col_width - 5) / 2) 
+                    header_text = header_text[:avail_len] + "..." + header_text[-4:] 
+                    
+                    if pdf.get_string_width(header_text) > col_width - 2:
+                         header_text = header_text[:12] + "..."
+
+                pdf.cell(col_width, 8, header_text, 1, 0, "C", fill=True)
+            pdf.ln()
+            
+            pdf.set_text_color(0, 0, 0)
+
+        for chunk_index, batch_datasets in enumerate(dataset_chunks):
+            
+            num_in_batch = len(batch_datasets)
+            
+            calculated_width = available_data_width / num_in_batch
+            current_col_width = min(calculated_width, max_data_col_width)
+            
+            pdf.add_page()
+            draw_header(batch_datasets, current_col_width)
+            
+            if include_plots:
+                plot_height = current_col_width * 0.75 
+                
+                if pdf.get_y() + plot_height > bottom_limit:
+                    pdf.add_page()
+                    draw_header(batch_datasets, current_col_width)
+
+                y_start = pdf.get_y()
+                
+                pdf.set_fill_color(240, 240, 240)
+                pdf.set_font(pdf.font_name, "B", 9)
+                pdf.cell(param_col_width, plot_height, " Scan Geometry", 1, 0, "L", fill=True)
+                
+                temp_files = []
+                try:
+                    for i, ds in enumerate(batch_datasets):
+                        x_pos = pdf.l_margin + param_col_width + (i * current_col_width)
+                        
+                        plot_buffer = self.plotting_service.generate_plot_as_buffer(
+                            ds, 
+                            width_px=int(current_col_width * 10), 
+                            height_px=int(plot_height * 10), 
+                            show_filename=False, 
+                            for_report=True, 
+                            dpi=150, 
+                            bg_color="white"
+                        )
+                        
+                        pdf.set_xy(x_pos, y_start)
+                        pdf.cell(current_col_width, plot_height, "", 1, 0, "C", fill=True)
+                        
+                        if plot_buffer:
+                            try:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png", mode='wb') as temp_png:
+                                    temp_png.write(plot_buffer.getvalue())
+                                    temp_png_path = temp_png.name
+                                    temp_files.append(temp_png_path)
+                                
+                                plot_buffer.close()
+                                img_padding = 1
+                                img_w = current_col_width - (2 * img_padding)
+                                img_h = plot_height - (2 * img_padding)
+                                pdf.image(temp_png_path, x=x_pos + img_padding, y=y_start + img_padding, w=img_w, h=img_h)
+                            except Exception: pass
+                finally:
+                    for p in temp_files:
+                        try:
+                            if os.path.exists(p): os.remove(p)
+                        except: pass
+
+                pdf.ln(plot_height) 
+
+            for group_name, rows in view_data.items():
+                
+                if pdf.get_y() + 8 > bottom_limit:
+                    pdf.add_page()
+                    draw_header(batch_datasets, current_col_width)
+
+                pdf.set_font(pdf.font_name, "B", 9)
+                pdf.set_fill_color(220, 220, 220)
+                
+                batch_table_width = param_col_width + (num_in_batch * current_col_width)
+                pdf.cell(batch_table_width, 6, f" {group_name}", 1, 1, "L", fill=True)
+                
+                pdf.set_font(pdf.font_name, "", 8)
+                
+                for i, row in enumerate(rows):
+                    line_height = 5
+                    
+                    global_indices = [datasets.index(ds) for ds in batch_datasets]
+                    
+                    batch_values = []
+                    for g_idx in global_indices:
+                        val = row['values'][g_idx]
+                        if isinstance(val, list): 
+                            batch_values.append("; ".join(map(str, val)))
+                        else: 
+                            batch_values.append(str(val) if val is not None else "")
+
+                    if pdf.get_y() + line_height > bottom_limit:
+                        pdf.add_page()
+                        draw_header(batch_datasets, current_col_width)
+                        pdf.set_font(pdf.font_name, "B", 9)
+                        pdf.set_fill_color(220, 220, 220)
+                        pdf.cell(batch_table_width, 6, f" {group_name} (cont.)", 1, 1, "L", fill=True)
+                        pdf.set_font(pdf.font_name, "", 8)
+
+                    font_style = "B" if row.get('is_diff', False) else ""
+                    pdf.set_font(pdf.font_name, font_style, 8)
+                    
+                    if i % 2 == 1: pdf.set_fill_color(245, 245, 245)
+                    else: pdf.set_fill_color(255, 255, 255)
+                    
+                    pdf.cell(param_col_width, line_height, f" {row['label']}", 1, 0, "L", fill=True)
+                    
+                    for val in batch_values:
+                        display_val = val
+                        if pdf.get_string_width(display_val) > current_col_width - 2:
+                             while len(display_val) > 0 and pdf.get_string_width(display_val + "...") > current_col_width - 2:
+                                 display_val = display_val[:-1]
+                             display_val += "..."
+                        
+                        pdf.cell(current_col_width, line_height, display_val, 1, 0, "C", fill=True)
+                    
+                    pdf.ln()
+
+        try:
+            pdf.output(file_path)
+        except Exception as e:
+            raise OSError(f"Failed to save PDF: {e}")
 
     def _prepare_data_for_segment(self, dataset: Dataset, segment_index: int, params_to_include: List[Dict]) -> pd.DataFrame: 
         report_data = [] 
         segment = dataset.segments[segment_index] 
-        
+        scan_mode_groups = {6: "MS/MS (Pasef)", 9: "dia-PASEF", 11: "diagonal-PASEF", 5: "MS-MS/MS (bbCID)", 4: "MS/MS (Auto)", 3: "MS/MS (MRM)"}
+        workflow_specific_params = defaultdict(set)
+        for mode_name, param_list in self.config.parameter_definitions.items():
+            if mode_name != "__GENERAL__":
+                for p in param_list: workflow_specific_params[p].add(mode_name)
+        current_mode_name = segment.workflow_name 
         for param_config in params_to_include: 
             permname = param_config['permname'] 
+            required_modes = workflow_specific_params.get(permname)
+            if required_modes:
+                if current_mode_name not in required_modes:
+                    if "Pasef" in permname and "Pasef" not in current_mode_name: continue
+                    if "dia" in permname and "dia" not in current_mode_name: continue
+                    continue
             final_value = "" 
-            
             if permname == "calc_instrument_model":
                 val = dataset.instrument_model or "N/A"
                 final_value = "N/A" if val == "Unknown" else val
-            elif permname == "calc_tims_control_version":
-                final_value = dataset.tims_control_version or "N/A"
+            elif permname == "calc_tims_control_version": final_value = dataset.tims_control_version or "N/A"
             elif permname == "calc_last_modified_date":
                 val = dataset.last_modified_date or "N/A"
-                try:
-                    final_value = val.split('T')[0] if 'T' in val else val
-                except:
-                    final_value = val
-            elif permname == "calc_scan_mode": 
-                final_value = segment.workflow_name or "N/A" 
-            elif permname == "calc_segment_start_time": 
-                final_value = f"{segment.start_time:.2f} min" 
-            elif permname == "calc_segment_end_time": 
-                final_value = segment.end_time_display 
+                try: final_value = val.split('T')[0] if 'T' in val else val
+                except: final_value = val
+            elif permname == "calc_scan_mode": final_value = segment.workflow_name or "N/A" 
+            elif permname == "calc_segment_start_time": final_value = f"{segment.start_time:.2f} min" 
+            elif permname == "calc_segment_end_time": final_value = segment.end_time_display 
             else: 
                 original_active_index = dataset.active_segment_index 
                 dataset.active_segment_index = segment_index 
                 raw_value = dataset.get_parameter_value(permname) 
                 dataset.active_segment_index = original_active_index 
                 final_value = raw_value if isinstance(raw_value, list) else format_parameter_value(raw_value, param_config) 
-
-            report_data.append({ 
-                "Parameter": param_config.get('label', permname), 
-                "Category": param_config.get('category', "General"), 
-                "Value": final_value 
-            }) 
-
+            report_data.append({ "Parameter": param_config.get('label', permname), "Category": param_config.get('category', "General"), "Value": final_value }) 
         return pd.DataFrame(report_data)
-
 
     def _generate_csv(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], file_path: str): 
         all_data = [] 
@@ -1282,256 +2112,112 @@ class ReportGeneratorService:
             if not df.empty: 
                 df['Segment'] = f"Segment {index + 1}" 
                 all_data.append(df) 
-            
-        if not all_data: 
-            return 
-
+        if not all_data: return 
         final_df = pd.concat(all_data, ignore_index=True) 
-        final_df['Value'] = final_df['Value'].apply( 
-            lambda x: '; '.join(map(str, x)) if isinstance(x, list) else x 
-        ) 
+        final_df['Value'] = final_df['Value'].apply(lambda x: '; '.join(map(str, x)) if isinstance(x, list) else x) 
         final_df = final_df[['Segment', 'Category', 'Parameter', 'Value']] 
         final_df.to_csv(file_path, index=False, encoding='utf-8') 
 
-    def _generate_pdf(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict],  
-                      file_path: str, show_filename: bool, include_plot: bool, progress_callback: Optional[Callable] = None): 
-        
+    def _generate_pdf(self, dataset: Dataset, selected_segment_indices: List[int], params_to_include: List[Dict], file_path: str, show_filename: bool, include_plot: bool, progress_callback: Optional[Callable] = None): 
         class ReportPDF(FPDF): 
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.set_auto_page_break(auto=True, margin=15)
-                self.dataset_name = ""
-                self.segment_info = ""
-                self.page_width = 0
-                self.col_width = 0
-                self.gutter = 5
-                self.col_y = [0, 0]
-                self.current_col = 0
-                
-                self.font_name = "Helvetica" # Default fallback font
+                self.set_auto_page_break(auto=False); self.dataset_name = ""; self.segment_info = ""; self.page_width = 0; self.col_width = 0; self.gutter = 5; self.col_y = [0, 0]; self.current_col = 0; self.page_bottom_limit = 270 
+                self.font_name = "Helvetica" 
                 try:
-                    font_regular_path = resource_path("assets/DejaVuSans.ttf")
-                    font_bold_path = resource_path("assets/DejaVuSans-Bold.ttf")
-                    font_italic_path = resource_path("assets/DejaVuSans-Oblique.ttf")
-
-                    self.add_font("DejaVu", "", font_regular_path)
-                    self.add_font("DejaVu", "B", font_bold_path)
-                    self.add_font("DejaVu", "I", font_italic_path)
-                    
-                    self.font_name = "DejaVu" 
-                except RuntimeError:
-                    logging.getLogger(__name__).warning(
-                        "DejaVu font files not found in assets/. PDF report will fall back to Helvetica."
-                        " Special characters may not render correctly."
-                    )
-
+                    font_regular_path = resource_path("assets/DejaVuSans.ttf"); font_bold_path = resource_path("assets/DejaVuSans-Bold.ttf"); font_italic_path = resource_path("assets/DejaVuSans-Oblique.ttf")
+                    self.add_font("DejaVu", "", font_regular_path); self.add_font("DejaVu", "B", font_bold_path); self.add_font("DejaVu", "I", font_italic_path); self.font_name = "DejaVu" 
+                except RuntimeError: pass
             def header(self):
-                self.set_font(self.font_name, "I", 8)
-                self.cell(0, 10, self.dataset_name, 0, 0, "L")
-                self.cell(0, 10, self.segment_info, 0, 0, "R")
-                self.ln(12) 
-
+                self.set_font(self.font_name, "I", 8); self.cell(0, 10, self.dataset_name, 0, 0, "L"); self.cell(0, 10, self.segment_info, 0, 0, "R"); self.ln(12); self.col_y = [self.get_y(), self.get_y()] 
             def footer(self):
-                self.set_y(-15)
-                self.set_font(self.font_name, "I", 8)
-                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", 0, 0, "R")
-
-            def start_page_setup(self): 
-                self.page_width = self.w - self.l_margin - self.r_margin 
-                self.col_width = (self.page_width - self.gutter) / 2 
-            
-            def start_columns(self): 
-                self.col_y = [self.get_y(), self.get_y()] 
-                self.current_col = 0 
-            
+                self.set_y(-15); self.set_font(self.font_name, "I", 8); self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", 0, 0, "R")
+            def start_page_setup(self): self.page_width = self.w - self.l_margin - self.r_margin; self.col_width = (self.page_width - self.gutter) / 2; self.page_bottom_limit = self.h - 20 
+            def start_columns(self): self.col_y = [self.get_y(), self.get_y()]; self.current_col = 0 
             def draw_table(self, data: pd.DataFrame): 
                 self.current_col = 0 
-                self.col_y = [self.get_y(), self.get_y()] 
-
+                if self.col_y[0] == 0: self.col_y = [self.get_y(), self.get_y()]
                 for category_name, group in data.groupby('Category', sort=False): 
-                    if group.empty: 
-                        continue 
+                    if group.empty: continue 
                     self._draw_group(category_name, group.reset_index(drop=True)) 
-
             def _draw_group(self, category_name: str, group: pd.DataFrame): 
                 header_h = 7 
-                
-                if self.col_y[self.current_col] + header_h + 10 > self.page_break_trigger: 
-                    self._switch_column() 
-                
+                first_row_h = self._get_row_height(group.iloc[0], self.col_width * 0.6, self.col_width * 0.4) if not group.empty else 0
+                if self.col_y[self.current_col] + header_h + first_row_h > self.page_bottom_limit: self._switch_column() 
                 self._draw_header(category_name) 
-                
-                for i, (_, row) in enumerate(group.iterrows()): 
-                    self._draw_row(row, i, category_name) 
-            
+                for i, (_, row) in enumerate(group.iterrows()): self._draw_row(row, i, category_name) 
             def _switch_column(self): 
                 self.current_col = 1 - self.current_col 
-                if self.current_col == 0: 
-                    self.add_page() 
-                    self.start_columns() 
-            
+                if self.current_col == 0: self.add_page(); self.col_y = [self.get_y(), self.get_y()] 
             def _draw_header(self, text): 
-                header_h = 7 
-                x_pos = self.l_margin if self.current_col == 0 else self.l_margin + self.col_width + self.gutter 
-                y_pos = self.col_y[self.current_col] 
-
-                if y_pos > self.t_margin + 5: 
-                    self.set_y(y_pos + 2) 
-                else: 
-                    self.set_y(y_pos) 
-                
-                self.set_x(x_pos) 
-                self.set_font(self.font_name, "B", 10)
-                self.set_fill_color(4, 48, 77) 
-                self.set_text_color(255, 255, 255) 
-                self.cell(self.col_width, header_h, f" {text}", 0, 0, "L", fill=True) 
-                
-                self.col_y[self.current_col] = self.get_y() + header_h 
-
+                header_h = 7; x_pos = self.l_margin if self.current_col == 0 else self.l_margin + self.col_width + self.gutter; y_pos = self.col_y[self.current_col] 
+                self.set_xy(x_pos, y_pos); self.set_font(self.font_name, "B", 10); self.set_fill_color(4, 48, 77); self.set_text_color(255, 255, 255); self.cell(self.col_width, header_h, f" {text}", 0, 0, "L", fill=True); self.col_y[self.current_col] += header_h 
             def _get_line_count(self, text: str, width: float) -> int: 
-                self.set_font(self.font_name, "", 8)
-                words = str(text).split(' ') 
-                if not words: return 1 
-                
-                lines = 1 
-                current_line = words[0] 
-                effective_width = width - 2 * self.c_margin 
-                for word in words[1:]: 
-                    if self.get_string_width(current_line + " " + word) > effective_width: 
-                        lines += 1 
-                        current_line = word 
-                    else: 
-                        current_line += " " + word 
-                return lines 
-
+                self.set_font(self.font_name, "", 8); lines = str(text).split('\n'); count = 0; effective_width = width - 2  
+                for line in lines:
+                    if not line: count += 1; continue
+                    words = line.split(' '); current_line_w = 0
+                    for word in words:
+                        word_w = self.get_string_width(word + " ")
+                        if current_line_w + word_w > effective_width: count += 1; current_line_w = word_w
+                        else: current_line_w += word_w
+                    count += 1 
+                return max(1, count)
             def _get_row_height(self, row: pd.Series, param_w: float, value_w: float, line_h: float = 5) -> float: 
-                param_lines = self._get_line_count(f" {row['Parameter']}", param_w) 
-                value_lines = self._get_line_count(f" {row['Value']}", value_w) 
-                return max(param_lines, value_lines) * line_h 
-
+                param_lines = self._get_line_count(f" {row['Parameter']}", param_w); value_lines = self._get_line_count(f" {row['Value']}", value_w); return max(param_lines, value_lines) * line_h 
             def _draw_row(self, row_data: pd.Series, row_index: int, category_name: str): 
-                line_h = 5 
-                param_col_w = self.col_width * 0.6 
-                value_col_w = self.col_width * 0.4 
-
-                row_height = self._get_row_height(row_data, param_col_w, value_col_w, line_h) 
-                if self.col_y[self.current_col] + row_height > self.page_break_trigger: 
-                    self._switch_column() 
-                    self._draw_header(f"{category_name} (continued)") 
-                
-                x_pos = self.l_margin if self.current_col == 0 else self.l_margin + self.col_width + self.gutter 
-                start_y = self.col_y[self.current_col] 
-
-                self.set_font(self.font_name, "", 8)
-                self.set_text_color(0, 0, 0) 
-                self.set_draw_color(211, 211, 211) 
-                
-                is_striped = (row_index % 2 == 1) 
-                fill_color = (240, 240, 240) if is_striped else (255, 255, 255) 
-                self.set_fill_color(*fill_color) 
-                self.rect(x_pos, start_y, self.col_width, row_height, "F") 
-                self.rect(x_pos, start_y, self.col_width, row_height) 
-                self.line(x_pos + param_col_w, start_y, x_pos + param_col_w, start_y + row_height) 
-
-                self.set_xy(x_pos, start_y) 
-                self.multi_cell(param_col_w, line_h, f" {str(row_data['Parameter'])}", 0, "L") 
-                self.set_xy(x_pos + param_col_w, start_y) 
-                self.multi_cell(value_col_w, line_h, f" {str(row_data['Value'])}", 0, "L") 
-
-                self.col_y[self.current_col] = start_y + row_height 
-                self.set_y(self.col_y[self.current_col]) 
-        
+                line_h = 5; param_col_w = self.col_width * 0.6; value_col_w = self.col_width * 0.4; row_height = self._get_row_height(row_data, param_col_w, value_col_w, line_h) 
+                if self.col_y[self.current_col] + row_height > self.page_bottom_limit: self._switch_column(); self._draw_header(f"{category_name} (continued)") 
+                x_pos = self.l_margin if self.current_col == 0 else self.l_margin + self.col_width + self.gutter; start_y = self.col_y[self.current_col] 
+                self.set_font(self.font_name, "", 8); self.set_text_color(0, 0, 0); self.set_draw_color(211, 211, 211) 
+                is_striped = (row_index % 2 == 1); fill_color = (240, 240, 240) if is_striped else (255, 255, 255); self.set_fill_color(*fill_color) 
+                self.rect(x_pos, start_y, self.col_width, row_height, "F"); self.rect(x_pos, start_y, self.col_width, row_height); self.line(x_pos + param_col_w, start_y, x_pos + param_col_w, start_y + row_height) 
+                self.set_xy(x_pos, start_y); self.multi_cell(param_col_w, line_h, f" {str(row_data['Parameter'])}", 0, "L") 
+                self.set_xy(x_pos + param_col_w, start_y); self.multi_cell(value_col_w, line_h, f" {str(row_data['Value'])}", 0, "L") 
+                self.col_y[self.current_col] += row_height 
         if progress_callback: progress_callback(1, "Initializing PDF...") 
-        pdf = ReportPDF() 
-        pdf.alias_nb_pages() 
-        pdf.add_page() 
-        pdf.start_page_setup() 
-
-        pdf.set_font(pdf.font_name, "B", 20)
-        pdf.cell(0, 10, "timsCompare Method Report", 0, 1, "C") 
-        if show_filename: 
-            pdf.dataset_name = f"File: {dataset.display_name}" 
-            pdf.set_font(pdf.font_name, "", 12)
-            pdf.cell(0, 10, pdf.dataset_name, 0, 1, "C") 
+        pdf = ReportPDF(); pdf.alias_nb_pages(); pdf.add_page(); pdf.start_page_setup() 
+        pdf.set_font(pdf.font_name, "B", 20); pdf.cell(0, 10, "timsCompare Method Report", 0, 1, "C") 
+        if show_filename: pdf.dataset_name = f"File: {dataset.display_name}"; pdf.set_font(pdf.font_name, "", 12); pdf.cell(0, 10, pdf.dataset_name, 0, 1, "C") 
         pdf.ln(5) 
-
         for i, index in enumerate(selected_segment_indices): 
             segment = dataset.segments[index] 
             segment_title = "" 
-            if len(dataset.segments) > 1: 
-                segment_title = f"Segment {index + 1} ({segment.start_time:.2f} - {segment.end_time_display})" 
-            
+            if len(dataset.segments) > 1: segment_title = f"Segment {index + 1} ({segment.start_time:.2f} - {segment.end_time_display})" 
             pdf.segment_info = segment_title 
-
-            if i > 0: 
-                pdf.add_page() 
-                pdf.start_page_setup() 
-            
+            if i > 0: pdf.add_page() 
+            pdf.start_columns() 
             if segment_title: 
-                pdf.set_font(pdf.font_name, "B", 16)
-                pdf.cell(0, 10, segment_title, 0, 1, "L") 
-                pdf.ln(2) 
-            
+                pdf.set_font(pdf.font_name, "B", 16); pdf.cell(0, 10, segment_title, 0, 1, "L"); pdf.ln(2); pdf.col_y = [pdf.get_y(), pdf.get_y()] 
             if include_plot: 
                 if progress_callback: progress_callback(0, f"Generating plot for segment {index+1}...") 
-                
-                original_active_index = dataset.active_segment_index 
-                dataset.active_segment_index = index 
-                
-                page_width_mm = pdf.w - pdf.l_margin - pdf.r_margin 
-                plot_width_in = page_width_mm / 25.4 
-                plot_height_in = plot_width_in * 0.4 
-
-                png_buffer = self.plotting_service.generate_plot_as_buffer( 
-                    dataset, 
-                    width_px=int(plot_width_in * 300), 
-                    height_px=int(plot_height_in * 300), 
-                    show_filename=show_filename, 
-                    for_report=True, 
-                    dpi=300, 
-                    bg_color="white" 
-                ) 
-                
+                original_active_index = dataset.active_segment_index; dataset.active_segment_index = index 
+                page_width_mm = pdf.w - pdf.l_margin - pdf.r_margin; plot_width_in = page_width_mm / 25.4; plot_height_in = plot_width_in * 0.4 
+                png_buffer = self.plotting_service.generate_plot_as_buffer(dataset, width_px=int(plot_width_in * 300), height_px=int(plot_height_in * 300), show_filename=show_filename, for_report=True, dpi=300, bg_color="white") 
                 dataset.active_segment_index = original_active_index 
-
                 if progress_callback: progress_callback(1, "Embedding plot...") 
                 if png_buffer: 
+                    temp_png_path = ""
                     try: 
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png", mode='wb') as temp_png: 
-                            temp_png.write(png_buffer.getvalue()) 
-                            temp_png_path = temp_png.name 
-                        
-                        pdf.image(temp_png_path, w=page_width_mm) 
-                        pdf.ln(5) 
-                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png", mode='wb') as temp_png: temp_png.write(png_buffer.getvalue()); temp_png_path = temp_png.name 
+                        pdf.image(temp_png_path, w=page_width_mm); pdf.ln(5); pdf.col_y = [pdf.get_y(), pdf.get_y()] 
                     finally: 
                         png_buffer.close() 
-                        if 'temp_png_path' in locals() and os.path.exists(temp_png_path): 
-                            os.remove(temp_png_path) 
-            
+                        if temp_png_path and os.path.exists(temp_png_path): os.remove(temp_png_path) 
             if progress_callback: progress_callback(1, f"Drawing table for segment {index+1}...") 
-            pdf.start_columns() 
-            data_df = self._prepare_data_for_segment(dataset, index, params_to_include) 
-            
+            pdf.start_columns(); data_df = self._prepare_data_for_segment(dataset, index, params_to_include) 
             expanded_rows = [] 
             for _, row in data_df.iterrows(): 
                 if isinstance(row['Value'], list): 
-                    parent_row = row.copy() 
-                    parent_row['Value'] = f"List ({len(row['Value'])} items)" 
-                    expanded_rows.append(parent_row) 
+                    parent_row = row.copy(); parent_row['Value'] = f"List ({len(row['Value'])} items)"; expanded_rows.append(parent_row) 
                     for item_index, item_value in enumerate(row['Value']): 
-                        child_row = row.copy() 
-                        child_row['Parameter'] = f"    -> Item {item_index + 1}" 
-                        child_row['Value'] = item_value 
-                        expanded_rows.append(child_row) 
-                else: 
-                    expanded_rows.append(row) 
-            
-            if expanded_rows: 
-                data_df = pd.DataFrame(expanded_rows) 
-
-            pdf.draw_table(data_df) 
-            pdf.set_y(max(pdf.col_y)) 
-
+                        child_row = row.copy(); child_row['Parameter'] = f"    -> Item {item_index + 1}"; child_row['Value'] = item_value; expanded_rows.append(child_row) 
+                else: expanded_rows.append(row) 
+            if expanded_rows: data_df = pd.DataFrame(expanded_rows) 
+            pdf.draw_table(data_df); pdf.set_y(max(pdf.col_y)) 
         if progress_callback: progress_callback(1, "Saving final PDF...") 
-        pdf.output(file_path)
+        abs_path = os.path.abspath(file_path)
+        try: pdf.output(abs_path)
+        except Exception as e: raise OSError(f"FPDF Save Error: {e}")
+        if not os.path.exists(abs_path): raise IOError(f"File was not created at: {abs_path}")
+        if os.path.getsize(abs_path) == 0: raise IOError(f"File was created but is empty (0 bytes): {abs_path}")

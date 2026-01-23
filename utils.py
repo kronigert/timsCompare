@@ -1,10 +1,6 @@
 # utils.py
 
-import logging
-import logging.handlers
 from typing import Any, Dict
-
-import settings
 
 import sys
 import os
@@ -22,6 +18,13 @@ def format_parameter_value(value: Any, param_config: Dict) -> str:
     param_type = param_config.get("type")
     if (param_type == "boolean") or (permname and permname.endswith("Switch")):
         return "On" if str(value) in ["1", "true", "True"] else "Off"
+    
+    if permname in ["calc_aip_lens1_profile_ms_display_list", "calc_aip_lens1_profile_msms_display_list"] and isinstance(value, list):
+         count = max(0, len(value) - 1)
+         return f"AIP Profile ({count} Steps)"
+
+    if permname == "calc_advanced_ce_ramping_display_list" and isinstance(value, list):
+        return f"List ({len(value)} items)"
             
     if permname == "calc_advanced_ce_ramping_display_list" and isinstance(value, list):
         return f"List ({len(value)} items)"
