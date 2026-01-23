@@ -6,7 +6,7 @@
 
 A desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker's .d or .m method directories.
 
-<img width="1918" height="1028" alt="Method_Comparison" src="https://github.com/user-attachments/assets/6e0a8091-bf04-4a2f-a876-1d1b1a8ef655" />
+<img width="1645" height="886" alt="Main_window" src="https://github.com/user-attachments/assets/cea1a89e-f632-47f8-9c0d-c52b44e52e0d" />
 
 ---
 
@@ -61,7 +61,7 @@ After loading your data, you can add more parameters to the comparison table:
 3.  Select the desired parameters using the checkboxes.
 4.  Click **Apply** to add them to the main view.
 
-<img width="1202" height="732" alt="Parameters" src="https://github.com/user-attachments/assets/5416521b-e424-43f5-831e-84d40c373be3" />
+<img width="1192" height="725" alt="Parameters" src="https://github.com/user-attachments/assets/bb349dd5-0642-46b1-9dee-b4cbfb65b7db" />
 
 ### Session Management
 
@@ -85,6 +85,8 @@ The **Report Wizard** handles both batch documentation and comparison overviews.
     * **Format:** PDF or CSV.
     * **Options:** Toggle Plots, Filename Headers, or export All Segments vs. Active Segment.
 
+<img width="1100" height="782" alt="Report_Wizard" src="https://github.com/user-attachments/assets/e9b7f179-ff75-4cc6-b057-c4737255325a" />
+
 ### Exporting Scan Windows
 
 This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and allows you to save the scan window definitions to a text file.
@@ -105,6 +107,8 @@ You can change the default set of parameters that are loaded for each scan mode:
 4.  Use the `>` and `<` buttons (or double-click) to move parameters to the "Default View Parameters" list.
 5.  Reorder the parameters in the right-hand list using **drag-and-drop** or the **Up/Down** buttons.
 6.  Click **Save Changes**. The application will now use this new layout as the default for that scan mode (a restart may be required).
+
+<img width="893" height="673" alt="Manage_Views" src="https://github.com/user-attachments/assets/6b558288-f033-44b9-a1cf-12141c2fa02e" />
 
 ---
 ## Disclaimer
