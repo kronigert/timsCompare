@@ -1,0 +1,197 @@
+
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="google-site-verification" content="H4eFJCaLTDwXQKmoWV2bDGarICw4FI8hMJI8qFPvQl0" />
+
+<!-- Begin Jekyll SEO tag v2.8.0 -->
+<title>timsCompare | A desktop application for mass spectrometry users to load, view, compare timsTOF methods and export isolation schemes and method reports from Bruker’s .d method directories.</title>
+<meta name="generator" content="Jekyll v3.10.0" />
+<meta property="og:title" content="timsCompare" />
+<meta property="og:locale" content="en_US" />
+<meta name="description" content="A desktop application for mass spectrometry users to load, view, compare timsTOF methods and export isolation schemes and method reports from Bruker’s .d method directories." />
+<meta property="og:description" content="A desktop application for mass spectrometry users to load, view, compare timsTOF methods and export isolation schemes and method reports from Bruker’s .d method directories." />
+<link rel="canonical" href="https://kronigert.github.io/timsCompare/" />
+<meta property="og:url" content="https://kronigert.github.io/timsCompare/" />
+<meta property="og:site_name" content="timsCompare" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+<meta property="twitter:title" content="timsCompare" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebSite","description":"A desktop application for mass spectrometry users to load, view, compare timsTOF methods and export isolation schemes and method reports from Bruker’s .d method directories.","headline":"timsCompare","name":"timsCompare","url":"https://kronigert.github.io/timsCompare/"}</script>
+<!-- End Jekyll SEO tag -->
+
+    <link rel="stylesheet" href="/timsCompare/assets/css/style.css?v=9ec8db8c951a2429869004bb5dae4c478a322eb2">
+    <!-- start custom head snippets, customize with your own _includes/head-custom.html file -->
+
+<!-- Setup Google Analytics -->
+
+
+
+<!-- You can set your favicon here -->
+<!-- link rel="shortcut icon" type="image/x-icon" href="/timsCompare/favicon.ico" -->
+
+<!-- end custom head snippets -->
+
+  </head>
+  <body>
+    <div class="container-lg px-3 my-5 markdown-body">
+      
+
+      <h1 id="timscompare">timsCompare</h1>
+
+<p><a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+" /></a>
+<a href="https://github.com/kronigert/timsCompare/releases"><img src="https://img.shields.io/github/v/release/kronigert/timsCompare?label=latest%20release" alt="Latest Release" /></a></p>
+
+<p>A desktop application for mass spectrometry users to load, view, compare, and export  methods from Bruker’s .d or .m method directories.</p>
+
+<p><img width="1645" height="886" alt="Main_window" src="https://github.com/user-attachments/assets/cea1a89e-f632-47f8-9c0d-c52b44e52e0d" /></p>
+
+<hr />
+
+<h2 id="about-the-project">About The Project</h2>
+
+<p><strong>timsCompare</strong> is a desktop application developed for mass spectrometry users to efficiently analyze instrument method files. Built with Python and customtkinter, it provides an intuitive graphical interface to parse, visualize, and compare metadata from Bruker’s <code class="language-plaintext highlighter-rouge">.d</code> and <code class="language-plaintext highlighter-rouge">.m</code> method directories.</p>
+
+<p>The application can handle various acquisition modes, including PASEF, dia-PASEF, diagonal-PASEF, and more.</p>
+
+<h3 id="key-features">Key Features</h3>
+
+<ul>
+  <li><strong>Side-by-Side Comparison:</strong> Load multiple methods and compare their parameters in a clear, tabular format that highlights differences.</li>
+  <li><strong>View Management:</strong> Temporarily add extra parameters with the “Add Parameters” dialog, or instantly revert to your customized layout with the “Reset View” button.</li>
+  <li><strong>Session Management:</strong> Save your current workspace (loaded files, active segments, and view settings) into a portable <code class="language-plaintext highlighter-rouge">.tcs</code> snapshot file. Open projects later without needing access to the original raw data folders.</li>
+  <li><strong>Unified Reporting:</strong> Generate documentation using the Report Wizard:
+    <ul>
+      <li><strong>Method Reports:</strong> Detailed one-file-per-page PDF/CSV reports.</li>
+      <li><strong>Comparison Reports:</strong> Side-by-side comparison matrix (PDF/CSV) of all selected files.</li>
+    </ul>
+  </li>
+  <li><strong>Multi-Segment Analysis:</strong> Automatically parses and displays methods with multiple segments. Includes a “Compare Segments” mode to view all segments of a single file side-by-side.</li>
+  <li><strong>Graphical Visualization:</strong> Generates plots of isolation schemes for PASEF, dia-PASEF, and diagonal-PASEF methods.</li>
+  <li><strong>Data Export:</strong> Export scan window tables (e.g., dia-PASEF windows, diagonal-PASEF, PASEF polygons) to text files for import into timsControl.</li>
+  <li><strong>Customizable Default View:</strong> Configure preferred default parameters for each acquisition mode via the “Manage Views” window.</li>
+</ul>
+
+<hr />
+
+<h2 id="getting-started">Getting Started</h2>
+
+<p>The recommended way to use timsCompare is to download the pre-compiled installer via the release page.</p>
+
+<h3 id="installation">Installation</h3>
+
+<ol>
+  <li><strong>Download:</strong> Go to the <a href="https://github.com/kronigert/timsCompare/releases"><strong>Releases Page</strong></a> and download the <code class="language-plaintext highlighter-rouge">timsCompare_Setup_vX.X.zip</code> file from the latest release.</li>
+  <li><strong>Extract:</strong> Unzip the downloaded file and run the installer.</li>
+  <li><strong>Run:</strong> Open timsCompare from the start menu or a shortcut to start the application.</li>
+</ol>
+
+<hr />
+
+<h2 id="how-to-use">How to Use</h2>
+
+<h3 id="loading-data">Loading Data</h3>
+
+<ul>
+  <li><strong>Drag and Drop:</strong> Drag one or more <code class="language-plaintext highlighter-rouge">.d</code> / <code class="language-plaintext highlighter-rouge">.m</code> folders <strong>or</strong> a saved <code class="language-plaintext highlighter-rouge">.tcs</code> session file directly onto the application window.</li>
+  <li><strong>Load Files Button:</strong> Use the “Load Files” dropdown in the top toolbar to select data folders or open a saved session.</li>
+</ul>
+
+<p>The parameter values of the loaded datasets are compared, and differences are highlighted in bold text.</p>
+
+<h3 id="adding-parameters">Adding Parameters</h3>
+
+<p>After loading your data, you can add more parameters to the comparison table:</p>
+
+<ol>
+  <li>Click the <strong>Add Parameters</strong> button in the top toolbar.</li>
+  <li>In the new window, search or scroll to find the parameters you wish to add.</li>
+  <li>Select the desired parameters using the checkboxes.</li>
+  <li>Click <strong>Apply</strong> to add them to the main view.</li>
+</ol>
+
+<p><img width="1192" height="725" alt="Parameters" src="https://github.com/user-attachments/assets/bb349dd5-0642-46b1-9dee-b4cbfb65b7db" /></p>
+
+<h3 id="session-management">Session Management</h3>
+
+<p>timsCompare allows you to save your current work as a “Snapshot”:</p>
+
+<ol>
+  <li>Load your data and configure your view (add parameters, select segments).</li>
+  <li>Click the <strong>Save Session</strong> button.</li>
+  <li>This creates a <code class="language-plaintext highlighter-rouge">.tcs</code> file which embeds all necessary metadata and scan geometry.</li>
+  <li>You can send this file to colleagues or open it later to resume analysis, even if you no longer have access to the original raw data drives.</li>
+</ol>
+
+<h3 id="generating-reports">Generating Reports</h3>
+
+<p>The <strong>Report Wizard</strong> handles both batch documentation and comparison overviews.</p>
+
+<ol>
+  <li>Load your datasets.</li>
+  <li>Click the <strong>Export</strong> button and select <strong>Report Wizard</strong>.</li>
+  <li><strong>Select Datasets:</strong> Choose which loaded files to include.</li>
+  <li><strong>Select Parameters:</strong> The current view is selected by default, but you can customize it here.</li>
+  <li><strong>Output Settings:</strong>
+    <ul>
+      <li><strong>Report Type:</strong> Choose between <strong>Method Report</strong> (individual file details) or <strong>Comparison Report</strong> (side-by-side comparison table).</li>
+      <li><strong>Format:</strong> PDF or CSV.</li>
+      <li><strong>Options:</strong> Toggle Plots, Filename Headers, or export All Segments vs. Active Segment.</li>
+    </ul>
+  </li>
+</ol>
+
+<p><img width="1100" height="782" alt="Report_Wizard" src="https://github.com/user-attachments/assets/e9b7f179-ff75-4cc6-b057-c4737255325a" /></p>
+
+<h3 id="exporting-scan-windows">Exporting Scan Windows</h3>
+
+<p>This feature is available for PASEF, dia-PASEF, and diagonal-PASEF methods and allows you to save the scan window definitions to a text file.</p>
+
+<ol>
+  <li>Load the dataset containing the scan windows you wish to export.</li>
+  <li>In the bottom-left corner of the window, select the correct dataset from the <strong>File</strong> dropdown menu.</li>
+  <li>Click the <strong>Export</strong> button and select <strong>Windows</strong> from the menu.</li>
+  <li>A save dialog will open, allowing you to choose a location and name for the exported <code class="language-plaintext highlighter-rouge">.txt</code> file.</li>
+  <li>Exported diagonal-PASEF and dia-PASEF windows can directly be imported into timsControl. For PASEF methods, the polygon has to be created manually in timsControl using the x,y coordinates from the exported .txt</li>
+</ol>
+
+<h3 id="customizing-the-default-view">Customizing the Default View</h3>
+
+<p>You can change the default set of parameters that are loaded for each scan mode:</p>
+
+<ol>
+  <li>Click the <strong>Manage Views</strong> button in the top toolbar.</li>
+  <li>In the new window, select the <strong>Scan Mode</strong> (e.g., “General”, “dia-PASEF”) you wish to edit.</li>
+  <li>Use the <strong>Group</strong> and <strong>Search</strong> filters to find parameters in the “Available Parameters” list.</li>
+  <li>Use the <code class="language-plaintext highlighter-rouge">&gt;</code> and <code class="language-plaintext highlighter-rouge">&lt;</code> buttons (or double-click) to move parameters to the “Default View Parameters” list.</li>
+  <li>Reorder the parameters in the right-hand list using <strong>drag-and-drop</strong> or the <strong>Up/Down</strong> buttons.</li>
+  <li>Click <strong>Save Changes</strong>. The application will now use this new layout as the default for that scan mode (a restart may be required).</li>
+</ol>
+
+<p><img width="893" height="673" alt="Manage_Views" src="https://github.com/user-attachments/assets/6b558288-f033-44b9-a1cf-12141c2fa02e" /></p>
+
+<hr />
+<h2 id="disclaimer">Disclaimer</h2>
+
+<p>timsCompare is an independent, third-party tool and is not an official Bruker product, nor is it affiliated with or supported by Bruker. If you encounter bugs or wrong values being displayed, please let me know via the <a href="https://github.com/kronigert/timsCompare/issues"><strong>Issues</strong> section</a>.</p>
+
+<h2 id="license">License</h2>
+
+<p>Distributed under the MIT License. See <code class="language-plaintext highlighter-rouge">LICENSE</code> for more information.</p>
+
+
+      
+      <div class="footer border-top border-gray-light mt-5 pt-3 text-right text-gray">
+        This site is open source. <a href="https://github.com/kronigert/timsCompare/edit/main/README.md">Improve this page</a>.
+      </div>
+      
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/anchor-js/4.1.0/anchor.min.js" integrity="sha256-lZaRhKri35AyJSypXXs4o6OPFTbTmUoltBbDCbdzegg=" crossorigin="anonymous"></script>
+    <script>anchors.add();</script>
+  </body>
+</html>
